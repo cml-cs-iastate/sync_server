@@ -1,0 +1,3 @@
+aiohttp >= 3.3
+google-cloud-pubsub >= 0.35
+
