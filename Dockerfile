@@ -36,6 +36,8 @@ RUN echo "*/1 * * * * /usr/local/bin/send_to_server.sh" >> /etc/crontabs/bot_syn
 USER bot_sync
 RUN mkdir -p /home/bot_sync/.ssh
 COPY --chown=bot_sync:botgroup ./id_rsa /home/bot_sync/.ssh/id_rsa
+# ssh key not visible to "others"
+RUN chmod 400 /home/bot_sync/.ssh/id_rsa
 COPY --chown=bot_sync:botgroup ./id_rsa.pub /home/bot_sync/.ssh/id_rsa.pub
 RUN ssh-keyscan db.misc.iastate.edu >> /home/bot_sync/.ssh/known_hosts
 
