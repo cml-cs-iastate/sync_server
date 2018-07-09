@@ -65,10 +65,15 @@ if __name__ == "__main__":
         credential_location: str = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
     except KeyError:
         raise ValueError("GOOGLE_APPLICATION_CREDENTIALS were not set")
-    server_address = '/home/bot_sync/socks/sync.sock'
+    try:
+        topic_batch: str = os.environ["NOTIFY_TOPIC"]
+    except KeyError as e:
+        raise KeyError("NOTIFY_TOPIC must be set, choices (batch_production or development)") from e
+
+    server_address = '/home/sync/socks/sync.sock'
     print(server_address)
     publisher: pubsub_v1.PublisherClient = pubsub_v1.PublisherClient()
-    topic: str = publisher.topic_path(project_id, topic="batch")
+    topic: str = publisher.topic_path(project_id, topic=topic_batch)
     print(type(topic))
     print(topic)
     # Make sure the socket does not already exist
