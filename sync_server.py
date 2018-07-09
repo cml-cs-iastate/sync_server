@@ -10,6 +10,10 @@ import asyncio
 from google.cloud import pubsub_v1
 
 
+async def test_check(request: aiohttp.web_request.Request):
+    return web.Response(text="")
+
+
 async def han_complete(request: aiohttp.web_request.Request):
     text: str = await request.text()
     complete: bot_api.BatchCompleted = bot_api.BatchCompleted.from_json(text)
@@ -61,10 +65,15 @@ if __name__ == "__main__":
         credential_location: str = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
     except KeyError:
         raise ValueError("GOOGLE_APPLICATION_CREDENTIALS were not set")
-    server_address = '/home/bot_sync/socks/sync.sock'
+    try:
+        topic_batch: str = os.environ["NOTIFY_TOPIC"]
+    except KeyError as e:
+        raise KeyError("NOTIFY_TOPIC must be set, choices (batch_production or development)") from e
+
+    server_address = '/home/sync/socks/sync.sock'
     print(server_address)
     publisher: pubsub_v1.PublisherClient = pubsub_v1.PublisherClient()
-    topic: str = publisher.topic_path(project_id, topic="batch")
+    topic: str = publisher.topic_path(project_id, topic=topic_batch)
     print(type(topic))
     print(topic)
     # Make sure the socket does not already exist
@@ -80,6 +89,6 @@ if __name__ == "__main__":
 
     app = web.Application()
     app.add_routes([web.post("/", han_complete),
+                    web.get("/test", test_check),
                     ])
-
     web.run_app(app, sock=sock)
