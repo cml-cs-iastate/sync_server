@@ -10,6 +10,10 @@ import asyncio
 from google.cloud import pubsub_v1
 
 
+async def test_check(request: aiohttp.web_request.Request):
+    return web.Response(text="")
+
+
 async def han_complete(request: aiohttp.web_request.Request):
     text: str = await request.text()
     complete: bot_api.BatchCompleted = bot_api.BatchCompleted.from_json(text)
@@ -80,6 +84,6 @@ if __name__ == "__main__":
 
     app = web.Application()
     app.add_routes([web.post("/", han_complete),
+                    web.get("/test", test_check),
                     ])
-
     web.run_app(app, sock=sock)
