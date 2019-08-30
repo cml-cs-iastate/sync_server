@@ -11,6 +11,10 @@ services:
             - STORAGE_HOST=${STORAGE_HOST:?STORAGE_HOST}
             - SYNC_DATA_DIR=/media
             - GOOGLE_CLOUD_PROJECT="cyads-203819"
+            - DATABASE
+            - DATABASE_USER
+            - DATABASE_PASSWORD
+            - DATABASE_HOST
         read_only: true
         volumes: 
             - type: bind
