@@ -1,50 +1,50 @@
-FROM alpine:latest
+FROM testcyads/base_os:0.2
 
-RUN mkdir -p /var/cache/apk
-RUN apk add --update --no-cache rsync openssh ca-certificates
-RUN apk add --no-cache python3
-RUN apk add --no-cache python3-dev
-RUN apk add --no-cache gcc
-RUN apk add --no-cache g++
-RUN apk add --no-cache make
-RUN apk add --no-cache musl-dev
-RUN pip3 install aiohttp --no-cache-dir
-RUN pip3 install google-cloud-pubsub --no-cache-dir
+RUN groupadd bot_group
+RUN groupadd sudo
+RUN useradd -rm -d /home/bot -s /bin/bash -g root -G sudo,bot_group -u 1000 bot
+RUN chmod -R 777 /home/bot
+RUN chown bot /home/bot -R
 
-RUN apk del python3-dev gcc g++ make musl-dev
+#RUN apt-get update && apt-get install -y --no-install-recommends git rsync ssh ca-certificates openconnect openvpn
 
+RUN pacman -Sy && pacman -S --noconfirm rsync openssh ca-certificates
 
-RUN apk add --no-cache git
+USER bot
+WORKDIR /home/bot
+RUN mkdir app
+COPY requirements.txt .
+RUN pip3 install --user --no-cache-dir -r requirements.txt
+USER root
+RUN pacman -S --noconfirm python-mysqlclient
+USER bot
+#RUN pip3 install --user --no-cache-dir mysqlclient
+
+USER root
+#RUN apt-get remove -y git
+RUN pacman -R --noconfirm git
+RUN pacman -Scc --noconfirm
+USER bot
 # install bot_api from git
-RUN pip3 install git+git://github.com/cml-cs-iastate/bot_api@master
 
-RUN apk del git
-# Needed by google pubsub
-RUN apk add --no-cache libstdc++
 
-RUN addgroup -g 1000 -S botgroup
-RUN adduser -u 1000 -S bot_sync -G botgroup
 
-COPY --chown=bot_sync:botgroup ./send_to_server.sh /usr/local/bin/send_to_server.sh
-RUN mkdir -p /home/bot_sync
-RUN chmod -R 777 /home/bot_sync
-RUN chown bot_sync /home/bot_sync -R
-RUN chmod +x /usr/local/bin/send_to_server.sh
 
-RUN echo "*/1 * * * * /usr/local/bin/send_to_server.sh" >> /etc/crontabs/bot_sync
+#RUN echo "*/1 * * * * /usr/local/bin/send_to_server.sh" >> /etc/crontabs/bot
 
-USER bot_sync
-RUN mkdir -p /home/bot_sync/.ssh
-COPY --chown=bot_sync:botgroup ./id_rsa /home/bot_sync/.ssh/id_rsa
+RUN mkdir -p /home/bot/.ssh
+COPY --chown=bot:bot_group ./id_rsa /home/bot/.ssh/id_rsa
 # ssh key not visible to "others"
-RUN chmod 400 /home/bot_sync/.ssh/id_rsa
-COPY --chown=bot_sync:botgroup ./id_rsa.pub /home/bot_sync/.ssh/id_rsa.pub
-RUN ssh-keyscan db.misc.iastate.edu >> /home/bot_sync/.ssh/known_hosts
+RUN chmod 400 /home/bot/.ssh/id_rsa
+COPY --chown=bot:bot_group ./id_rsa.pub /home/bot/.ssh/id_rsa.pub
+#RUN ssh-keyscan cyads.misc.iastate.edu >> /home/bot/.ssh/known_hosts
 
 # Set google project id and credential file
 ENV GOOGLE_CLOUD_PROJECT="cyads-203819"
-ENV GOOGLE_APPLICATION_CREDENTIALS="/home/bot_sync/creds/Cyads-pubsub.json"
-COPY --chown=bot_sync:botgroup ./Cyads_pubsub.json /home/bot_sync/creds/Cyads-pubsub.json
-COPY --chown=bot_sync:botgroup ./sync_server.py /usr/local/bin/sync_server.py
+ENV GOOGLE_APPLICATION_CREDENTIALS="/home/bot/creds/Cyads-pubsub.json"
+RUN mkdir /home/bot/creds
+COPY --chown=bot:bot_group ./Cyads_pubsub.json /home/bot/creds/Cyads-pubsub.json
+RUN mkdir -p app
+COPY . app
 
-CMD ["python3", "/usr/local/bin/sync_server.py"]
+CMD ["python3", "/home/bot/app/app.py"]

@@ -1,3 +1,6 @@
-aiohttp >= 3.3
-google-cloud-pubsub >= 0.35
-git+git://github.com/cml-cs-iastate/bot_api@master
+git+git://github.com/cml-cs-iastate/bot_api@0.8
+google-cloud-pubsub == 0.45.0
+aiohttp >= 3.5.4
+django == 2.2.4
+beautifulsoup4 == 4.8.0
+more_itertools == 7.2.0
