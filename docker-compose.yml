@@ -1,0 +1,21 @@
+version: '3.6'
+
+services:
+    sync:
+        image: testcyads/sync_server:0.4
+        environment:
+            - NOTIFY_TOPIC=${NOTIFY_TOPIC:?NOTIFY_TOPIC}
+            - SYNC_SOCKET=${SYNC_SOCKET:?SYNC_SOCKET}
+            - STORAGE_USER=${STORAGE_USER:?STORAGE_USER}
+            - STORAGE_DIR=${STORAGE_DIR:?STORAGE_HOST}
+            - STORAGE_HOST=${STORAGE_HOST:?STORAGE_HOST}
+            - SYNC_DATA_DIR=/media
+            - GOOGLE_CLOUD_PROJECT="cyads-203819"
+        read_only: true
+        volumes: 
+            - type: bind
+              source: ${SYNC_DATA_DIR:?SYNC_DATA_DIR}
+              target: /media
+            - type: bind
+              source: /tmp
+              target: /tmp
