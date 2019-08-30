@@ -205,7 +205,8 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
         raise Exception("Batch does not exist")
     if batch.synced:
         print("Batch is already synced")
-        raise Exception("batch is already synced")
+        print("Please implement cleanup with check")
+        #raise Exception("batch is already synced")
     # Preserve external ip recorded
     completion_msg.external_ip = batch.external_ip
 
@@ -349,7 +350,7 @@ async def reconstruct_all(request: aiohttp.web_request.Request):
         print(f"completion_msg: {msg.to_json()}")
 
 
-        if batch_is_old(msg) and not force_sync:
+        if not batch_is_old(msg) and not force_sync:
             print("Skipping batch, not old enough")
             continue
         print("directory syncing:", data_dir)

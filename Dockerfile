@@ -37,7 +37,9 @@ COPY --chown=bot:bot_group ./id_rsa /home/bot/.ssh/id_rsa
 # ssh key not visible to "others"
 RUN chmod 400 /home/bot/.ssh/id_rsa
 COPY --chown=bot:bot_group ./id_rsa.pub /home/bot/.ssh/id_rsa.pub
+
 #RUN ssh-keyscan cyads.misc.iastate.edu >> /home/bot/.ssh/known_hosts
+COPY --chown=bot:bot_group ./known_hosts /home/bot/.ssh/known_hosts
 
 # Set google project id and credential file
 ENV GOOGLE_CLOUD_PROJECT="cyads-203819"
