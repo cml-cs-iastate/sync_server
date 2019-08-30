@@ -192,9 +192,11 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
 
     # check if already synced
     print(completion_msg)
+
     try:
-        batch = Batch.objects.get(#location__state_name="alex-ubuntu",
+        batch = Batch.objects.get(location__state_name=completion_msg.location,
                                   start_timestamp=completion_msg.run_id,
+                                  server_hostname=completion_msg.host_hostname,
                                   server_container=completion_msg.hostname,
                                   )
         print("Batch found not synced")
@@ -203,12 +205,17 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
         print("batch does not exist")
         return -1
         raise Exception("Batch does not exist")
+    except Exception as e:
+        print(e)
+        return -2
     if batch.synced:
         print("Batch is already synced")
         print("Please implement cleanup with check")
         #raise Exception("batch is already synced")
     # Preserve external ip recorded
     completion_msg.external_ip = batch.external_ip
+    print("Updated completion msg with IP")
+    print(completion_msg)
 
     server_user = sync_context.storage_user
     dest_host = sync_context.storage_hostname
