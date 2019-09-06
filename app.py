@@ -498,6 +498,10 @@ def init_server() -> web.Application:
 
 
 if __name__ == "__main__":
+    # Initialize sentry_sdk for error handling
+    import sentry_sdk
+    sentry_sdk.init("https://2e6c116bc9d341b7afd8f349a9be0a6b@sentry.io/1554000")
+
     app = init_server()
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sync_server.settings")
     import django
