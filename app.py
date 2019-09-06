@@ -1,57 +1,61 @@
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Iterator, List, Optional, Union
 import io
 import re
-from typing import List
 from aiohttp import web
 import aiohttp
 import socket
 import bot_api
-from aiohttp import web_request
-import json
+from aiohttp import web_request, web_response
 import asyncio.subprocess as suprocess
 import asyncio
-from google.cloud import pubsub_v1
-from pathlib import Path
+from google.cloud import pubsub_v1, pubsub
 import os
-from typing import Optional
+import json
 
-from glob import iglob
-from bs4 import BeautifulSoup
-from typing import Iterator
 import pathlib
 from pathlib import Path
-import more_itertools
 from more_itertools import first, ilen
 from bot_api import (BatchSyncComplete, BatchSyncStatus, BatchSynced, BotEvents, BatchCompleted, BatchCompletionStatus)
 from datetime import datetime
-
-
-from typing import Union
 from django.core.exceptions import ObjectDoesNotExist
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sync_server.settings")
 
-from dataclasses import dataclass
+from sentry_sdk import capture_event, capture_exception, capture_message
 
-class AdFile:
+import shutil
+import logging
+
+
+class DumpFile:
     def __init__(self, filename: pathlib.Path):
         (self.bot_name,
         self.try_num,
         self.ad_seen_at,
         self.video_watched) = filename.stem.split("#")
 
-class AdStorage:
+class DumpDir:
     def __init__(self, ad_dir: pathlib.Path):
+
+        # The absolute path of the specific batch of ads
         self.path = ad_dir
         self.run_id = int(self.path.name)
-        (self.host_hostname, self.hostname) = self.path.parents[0].name.split("#")
+        (self.host_hostname, self.container_hostname) = self.path.parents[0].name.split("#")
         self.location = self.path.parents[1].name
+
+    @classmethod
+    def from_completion_msg(cls, completion_msg: BatchCompleted, base_dir: Path) -> DumpDir:
+        relative_inner_ad_path: Path = construct_directory_from_completion_msg(completion_msg)
+        abs_ad_path = base_dir.joinpath(relative_inner_ad_path).absolute()
+        return cls(ad_dir=abs_ad_path)
+
 
 @dataclass()
 class SyncContext:
     # directory where ads are stored in
     ad_base_dir: Path
-    # Directory of specific batch of ads
-    #ad_specific_dir: Path
     # hostname/ip to move ads to
     storage_hostname: str
     # username to login to the server in
@@ -66,7 +70,7 @@ class SyncContext:
 
 def count_txt_files(ad_dir: pathlib.Path) -> int:
     """Ad format v3"""
-    return ilen(ad_dir.glob("*.txt"))
+    return ilen(ad_dir.glob("Bot*.txt"))
 
 
 def count_xml_files(ad_dir: pathlib.Path) -> int:
@@ -104,7 +108,7 @@ def last_request_time(ad_dir: pathlib.Path) -> int:
         for ad_filename in reversed(ad_filenames):
             try:
                 abs_ad_filepath: pathlib.Path = ad_dir / ad_filename
-                return int(AdFile(abs_ad_filepath).ad_seen_at)
+                return int(DumpFile(abs_ad_filepath).ad_seen_at)
             except (AttributeError, ValueError) as e:
                 # Possible file corruption
                 print("FILE CORRUPTION IN FOLLOWING DIRECTORY")
@@ -131,12 +135,12 @@ def last_request_time(ad_dir: pathlib.Path) -> int:
             if "run_type.txt" in file.as_posix():
                 continue
             try:
-                ad = AdFile(file)
+                ad = DumpFile(file)
             except Exception as e:
                 print("DDDD", e, file)
                 raise e
-            if ad.ad_seen_at > latest:
-                latest = ad.ad_seen_at
+            if int(ad.ad_seen_at) > latest:
+                latest = int(ad.ad_seen_at)
         return latest
 
 
@@ -153,13 +157,7 @@ def batch_is_old(completion_msg: BatchCompleted):
 
 
 async def test_check(request: aiohttp.web_request.Request):
-    return web.Response(text="")
-
-
-async def test_post(request: aiohttp.web_request.Request):
-    content = await request.json()
-    return web.json_response(data=content)
-
+    return web.Response(text="OK")
 
 async def sync_directory(src: Path, sync_context: SyncContext) -> Union[BatchSyncComplete, bot_api.BatchSyncError]:
     rsync_commands = ["rsync", "-a", "--relative",
@@ -189,8 +187,7 @@ async def sync_directory(src: Path, sync_context: SyncContext) -> Union[BatchSyn
 
 
 async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync_context: SyncContext) -> int:
-
-    # check if already synced
+    """Syncs a batch from a completion msg"""
     print(completion_msg)
 
     try:
@@ -202,12 +199,12 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
         print("Batch found not synced")
         print(batch)
     except Batch.DoesNotExist:
-        print("batch does not exist")
+        print("batch does not exist with completion msg:", completion_msg)
         return -1
-        raise Exception("Batch does not exist")
     except Exception as e:
         print(e)
         return -2
+    # check if already synced
     if batch.synced:
         print("Batch is already synced")
         print("Please implement cleanup with check")
@@ -216,12 +213,6 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
     completion_msg.external_ip = batch.external_ip
     print("Updated completion msg with IP")
     print(completion_msg)
-
-    server_user = sync_context.storage_user
-    dest_host = sync_context.storage_hostname
-    dest_directory = sync_context.storage_base_dir
-    src_base = sync_context.ad_base_dir
-
 
     result = await sync_directory(src=ad_specific_dir,
                                   sync_context=sync_context)
@@ -245,43 +236,100 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
         print("No problems")
         return 0
 
+    return -2
 
 async def sync_single(request: aiohttp.web_request.Request):
 
     sync_context: SyncContext = request.app["sync_context"]
     src_base = sync_context.ad_base_dir
-    text: dict = await request.json()
-    ad_specific_path = Path(text["directory_to_sync"])
+    completion_msg: dict = await request.json()
+    # Note, fix bot_api.from_json to take str, and a dict
+    complete: bot_api.BatchCompleted = bot_api.BatchCompleted.from_json(json.dumps(completion_msg))
+    ad_specific_dir: DumpDir = DumpDir.from_completion_msg(base_dir=sync_context.ad_base_dir, completion_msg=complete)
+    app.logger.info(f"syncing batch path: {ad_specific_dir.path.as_posix()}")
 
-    completion_msg = text["completion_msg"]
-    complete: bot_api.BatchCompleted = bot_api.BatchCompleted.from_json(completion_msg)
+    print("syncing batch", complete.to_json())
+    returncode = await sync_batch(completion_msg=complete, sync_context=sync_context, ad_specific_dir=ad_specific_dir.path)
 
-    sync_context = request.app["sync_context"]
-
-    await sync_batch(completion_msg=complete, sync_context=sync_context)
+    if returncode < 0:
+        print("error when syncing")
+    elif returncode == 0:
+        print("No errors syncing batch")
 
     return web.Response(text="DONE")
 
 
-
 def construct_directory_from_completion_msg(msg: bot_api.BatchCompleted) -> Path:
 
-    return Path(msg.location) / f"{msg.host_hostname}#{msg.hostname}" / f"{msg.host_hostname}#{msg.hostname}" / f"{msg.timestamp}"
+    return (Path(msg.location)
+            .joinpath(f"{msg.host_hostname}#{msg.hostname}")
+            .joinpath(f"{msg.timestamp}")
+            )
+
+
+async def background_delete(app):
+
+    sync_context: SyncContext = app["sync_context"]
+    while True:
+
+        # Get list of non-deleted datasets
+        base_dir = sync_context.ad_base_dir
+
+        new_data_dirs = [x.parent for x in base_dir.glob("*/*#*/*/*.log")]
+        data_dir: Path
+
+        for data_dir in new_data_dirs:
+            with sentry_sdk.configure_scope() as scope:
+
+                dump_dir = DumpDir(data_dir)
+                scope.set_tag("host", dump_dir.host_hostname)
+
+                try:
+                    # Check Batch in db marked as synced before deletion
+                    # non-async django, may stall application.
+
+                    batch = Batch.objects.get(location__state_name=dump_dir.location,
+                                              start_timestamp=dump_dir.run_id,
+                                              server_hostname=dump_dir.host_hostname,
+                                              server_container=dump_dir.container_hostname,
+                                              )
+
+                    # WARNING: Any batch marked as synced is assumed to have been properly synced to a known location.
+                    if batch.synced:
+                        # Delete the directory
+                        print("Deleting:", dump_dir.path.as_posix())
+
+                        # Sanity check to make sure not deleting outside base ad dir
+                        if sync_context.ad_base_dir not in dump_dir.path.parents:
+                            print("tried to delete outside of ad dir:", dump_dir.path.as_posix())
+                            break
+                        print("deleting:", dump_dir.path.as_posix())
+                        shutil.rmtree(dump_dir.path, ignore_errors=True)
+                        print("deleted:", dump_dir.path.as_posix())
+                    await asyncio.sleep(1)
+                except django.core.exceptions.ObjectDoesNotExist:
+                    raise e
+                except django.core.exceptions.MultipleObjectsReturned as e:
+                    raise e
+
+                except asyncio.CancelledError:
+                    pass
 
 
 async def start_background_tasks(app):
-    app['periodic_sync'] = app.loop.create_task(background_print())
-    app["wait_shutdown"] = app.loop.create_task(wait_for_shutdown(app))
+    loop = asyncio.get_running_loop()
+    app['periodic_sync'] = loop.create_task(background_delete(app))
 
-async def periodic_sync():
-    result = await suprocess.create_subprocess_shell("crond")
-    print(result)
+async def cleanup_background_tasks(app):
+    app["periodic_sync"].cancel()
+    await app["periodic_sync"]
+
 
 def count_json_files(ad_dir: pathlib.Path) -> int:
     return ilen(ad_dir.glob("*.json"))
 
 
-def deterimine_ad_format_version(ad_dir: pathlib.Path) -> Optional[int]:
+def deterimine_ad_format_version(ad_dir: pathlib.Path) -> int:
     """ad_dir: The parent directory where the ad files are stored (xml, json)"""
 
     # Is it version 2+?
@@ -294,46 +342,52 @@ def deterimine_ad_format_version(ad_dir: pathlib.Path) -> Optional[int]:
         return 1
 
 
-def reconstruct_completion_msg(ad_dir: pathlib.Path) -> BatchCompleted:
+def reconstruct_completion_msg(dump_dir: DumpDir) -> BatchCompleted:
     """ad_dir: parent directory directly containing xml/json ad files
     returns a `BatchCompleted` message object"""
-    version: int = deterimine_ad_format_version(ad_dir)
+
+    # Hack for no metadata about number of bots ran
+    batch = Batch.objects.get(location__state_name=dump_dir.location,
+                              start_timestamp=dump_dir.run_id,
+                              server_hostname=dump_dir.host_hostname,
+                              server_container=dump_dir.container_hostname,
+                              )
+
+    version: int = deterimine_ad_format_version(dump_dir.path)
 
     # Version 3 of ad format we collect ad urls in .txt
     if version == 3:
-        ad_count = count_txt_files(ad_dir)
+        ad_count = count_txt_files(dump_dir.path)
     # Version 2 of ad format Google stores ad info in .json
     elif version == 2:
-        ad_count = count_json_files(ad_dir)
+        ad_count = count_json_files(dump_dir.path)
     # Version 1 of ad format Google stored ad info in .xml vast responses
     elif version == 1:
-        ad_count = count_xml_files(ad_dir)
+        ad_count = count_xml_files(dump_dir.path)
     else:
         raise NotImplemented(f"version: `{version}` not handled")
 
-    non_ads = count_non_ad_requests(ad_dir)
+    non_ads = count_non_ad_requests(dump_dir.path)
     try:
-        first_html = first(html_files(ad_dir))
+        first_html = first(html_files(dump_dir.path))
         external_ip = extract_ip_from_html_player(first_html.open())
         if external_ip == "0.0.0.0":
             print(first_html)
     except ValueError:
         # No html files present
         external_ip = "0.0.0.0"
-        print(ad_dir)
+        print(dump_dir.path)
     total_requests = ad_count + non_ads
-    last_request = last_request_time(ad_dir)
-    ad = AdStorage(ad_dir)
-    completion_msg = BatchCompleted(status=BatchCompletionStatus.COMPLETE, hostname=ad.hostname, run_id=ad.run_id,
-                                    external_ip=external_ip, bots_in_batch=8,
-                                    requests=total_requests, host_hostname=ad.host_hostname,
-                                    location=ad.location, ads_found=ad_count, timestamp=last_request)
+    last_request = last_request_time(dump_dir.path)
+    completion_msg = BatchCompleted(status=BatchCompletionStatus.COMPLETE, hostname=dump_dir.container_hostname, run_id=dump_dir.run_id,
+                                    external_ip=external_ip, bots_in_batch=batch.total_bots,
+                                    requests=total_requests, host_hostname=dump_dir.host_hostname,
+                                    location=dump_dir.location, ads_found=ad_count, timestamp=last_request)
     return completion_msg
 
 
 async def reconstruct_all(request: aiohttp.web_request.Request):
-    text = await request.text()
-    print(text)
+    _ = await request.text()
     sync_context: SyncContext = request.app["sync_context"]
 
     # sync all batches regardless of age
@@ -343,6 +397,7 @@ async def reconstruct_all(request: aiohttp.web_request.Request):
     elif force_sync in ["true", "True", "1"]:
         force_sync = True
     else:
+
         print(f"invalid option for force_sync: {force_sync}")
         force_sync = False
 
@@ -353,7 +408,8 @@ async def reconstruct_all(request: aiohttp.web_request.Request):
     data_dir: Path
 
     for data_dir in new_data_dirs:
-        msg = reconstruct_completion_msg(data_dir)
+        dump_dir = DumpDir(ad_dir=data_dir)
+        msg = reconstruct_completion_msg(dump_dir)
         print(f"completion_msg: {msg.to_json()}")
 
 
@@ -372,17 +428,24 @@ async def reconstruct_all(request: aiohttp.web_request.Request):
     return web.Response(text="OK")
 
 
+
+
 def init_server() -> web.Application:
 
+    stdio_handler = logging.StreamHandler()
+    stdio_handler.setLevel(logging.INFO)
+    _logger = logging.getLogger('aiohttp.access')
+    _logger.addHandler(stdio_handler)
+    _logger.setLevel(logging.DEBUG)
+
     # start application
-    app = web.Application()
+    app = web.Application(logger=_logger)
+
     app.add_routes([web.post("/", test_check),
                     web.get("/test", test_check),
-                    web.post("/test", test_post),
                     web.post("/single", sync_single),
                     web.get("/reconstruct_all", reconstruct_all),
                     ])
-
 
     dest_host = os.environ["STORAGE_HOST"]
     dest_directory = Path(os.environ["STORAGE_DIR"])
