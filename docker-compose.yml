@@ -2,7 +2,7 @@ version: '3.6'
 
 services:
     sync:
-        image: testcyads/sync_server:0.4
+        image: testcyads/sync_server:latest
         environment:
             - NOTIFY_TOPIC=${NOTIFY_TOPIC:?NOTIFY_TOPIC}
             - SYNC_SOCKET=${SYNC_SOCKET:?SYNC_SOCKET}
