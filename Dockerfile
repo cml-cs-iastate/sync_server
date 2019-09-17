@@ -1,18 +1,20 @@
 FROM testcyads/base_os:0.3
 
+# Delete selenium userid and home dir
+RUN userdel -r seluser
 RUN groupadd bot_group
 RUN useradd -rm -d /home/bot -s /bin/bash -g root -G sudo,bot_group -u 1000 -o bot
+USER 1000:1000
+RUN if [ "$(whoami)" != "bot" ]; then echo " user: $(whoami)" is not 'bot'; exit 2; fi
 RUN chmod -R 777 /home/bot
 RUN chown bot /home/bot -R
+ENV HOME=/home/bot
 
-#RUN apt-get update && apt-get install -y --no-install-recommends git rsync ssh ca-certificates openconnect openvpn
 
-USER bot
 WORKDIR /home/bot
 RUN mkdir app
 COPY requirements.txt .
 RUN python3.7 -m pip install --user --no-cache-dir -r requirements.txt
-USER bot
 # install bot_api from git
 
 
