@@ -51,6 +51,9 @@ class DumpDir:
         (self.host_hostname, self.container_hostname) = self.path.parents[0].name.split("#")
         self.location = self.path.parents[1].name
 
+    def __repr__(self):
+        return self.path.as_posix()
+
     @classmethod
     def from_completion_msg(cls, completion_msg: BatchCompleted, base_dir: Path) -> DumpDir:
         relative_inner_ad_path: Path = construct_directory_from_completion_msg(completion_msg)
@@ -203,8 +206,6 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
                                   server_hostname=completion_msg.host_hostname,
                                   server_container=completion_msg.hostname,
                                   )
-        print("Batch found not synced")
-        print(batch)
     except Batch.DoesNotExist as e:
         print("batch does not exist with completion msg:", completion_msg)
         raise e
@@ -237,7 +238,7 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
 
     if msg.data.kind == bot_api.BatchSyncStatus.ERROR:
         print("ERROR: ", msg.to_json())
-        raise Exception("Error syncing batch: ", sync_err=msg)
+        raise Exception("Error syncing batch: ", msg)
     elif msg.data.kind == bot_api.BatchSyncStatus.COMPLETE:
         print("No problems")
 
@@ -326,7 +327,7 @@ async def periodic_sync_ping(app):
         print("Starting background sync")
         try:
             conn = aiohttp.UnixConnector(path=server_address)
-            timeout = aiohttp.ClientTimeout(total=5)
+            timeout = aiohttp.ClientTimeout(total=60)
             async with aiohttp.ClientSession(connector=conn, raise_for_status=True) as session:
                 print("start get")
                 # localhost substitutes for the socket file
@@ -377,11 +378,14 @@ def reconstruct_completion_msg(dump_dir: DumpDir) -> BatchCompleted:
     returns a `BatchCompleted` message object"""
 
     # Hack for no metadata about number of bots ran
-    batch = Batch.objects.get(location__state_name=dump_dir.location,
+    try:
+        batch = Batch.objects.get(location__state_name=dump_dir.location,
                               start_timestamp=dump_dir.run_id,
                               server_hostname=dump_dir.host_hostname,
                               server_container=dump_dir.container_hostname,
                               )
+    except Batch.DoesNotExist as e:
+        print(f"Batch does not exist in db from directory: {dump_dir}")
 
     version: int = determine_ad_format_version(dump_dir.path)
 
@@ -423,7 +427,6 @@ async def reconstruct_all(request: aiohttp.web_request.Request):
     elif force_sync in ["true", "True", "1"]:
         force_sync = True
     else:
-
         print(f"invalid option for force_sync: {force_sync}")
         force_sync = False
 
@@ -432,19 +435,26 @@ async def reconstruct_all(request: aiohttp.web_request.Request):
     new_data_dirs = [x.parent for x in base_dir.glob("*/*#*/*/*.log")]
     data_dir: Path
 
+    err = False
     for data_dir in new_data_dirs:
-        dump_dir = DumpDir(ad_dir=data_dir)
-        msg = reconstruct_completion_msg(dump_dir)
-        print(f"completion_msg: {msg.to_json()}")
+        try:
+            dump_dir = DumpDir(ad_dir=data_dir)
+            msg = reconstruct_completion_msg(dump_dir)
+            print(f"completion_msg: {msg.to_json()}")
 
-        if not batch_is_old(msg) and not force_sync:
-            print("Skipping batch, not old enough")
+            if not batch_is_old(msg) and not force_sync:
+                print("Skipping batch, not old enough")
+                continue
+            print("directory syncing:", data_dir)
+            result = await sync_batch(ad_specific_dir=data_dir, completion_msg=msg, sync_context=sync_context)
+            print(result)
+        except Exception as e:
+            err = True
             continue
-        print("directory syncing:", data_dir)
-        result = await sync_batch(ad_specific_dir=data_dir, completion_msg=msg, sync_context=sync_context)
-        print(result)
-
-    return web.Response(text="OK Reconstruct and sync complete")
+    if err:
+        return web.Response(text="An error occurred syncing some batch(s)")
+    else:
+        return web.Response(text="OK Reconstruct and sync complete")
 
 
 def ad_dir_from_parts(base_dir: Path, location: str, host_hostname: str, container_hostname: str,
