@@ -51,6 +51,9 @@ class DumpDir:
         (self.host_hostname, self.container_hostname) = self.path.parents[0].name.split("#")
         self.location = self.path.parents[1].name
 
+    def __repr__(self):
+        return self.path.as_posix()
+
     @classmethod
     def from_completion_msg(cls, completion_msg: BatchCompleted, base_dir: Path) -> DumpDir:
         relative_inner_ad_path: Path = construct_directory_from_completion_msg(completion_msg)
@@ -157,9 +160,10 @@ def messages_from_file(file: pathlib.Path) -> List[BatchSynced]:
 
 
 def batch_is_old(completion_msg: BatchCompleted):
-    age_of_batch = datetime.now() - datetime.utcfromtimestamp(completion_msg.timestamp)
-    age_days_threshold = 2
-    return age_of_batch.days >= age_days_threshold
+    age_of_batch = datetime.now() - datetime.utcfromtimestamp(completion_msg.run_id)
+    age_hours_threshold = 24 * 1.25
+    batch_age_hours = age_of_batch.days * 24 + age_of_batch.seconds / 60 / 60
+    return batch_age_hours >= age_hours_threshold
 
 
 async def test_check(request: aiohttp.web_request.Request):
@@ -203,8 +207,6 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
                                   server_hostname=completion_msg.host_hostname,
                                   server_container=completion_msg.hostname,
                                   )
-        print("Batch found not synced")
-        print(batch)
     except Batch.DoesNotExist as e:
         print("batch does not exist with completion msg:", completion_msg)
         raise e
@@ -237,7 +239,7 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
 
     if msg.data.kind == bot_api.BatchSyncStatus.ERROR:
         print("ERROR: ", msg.to_json())
-        raise Exception("Error syncing batch: ", sync_err=msg)
+        raise Exception("Error syncing batch: ", msg)
     elif msg.data.kind == bot_api.BatchSyncStatus.COMPLETE:
         print("No problems")
 
@@ -268,55 +270,78 @@ def construct_directory_from_completion_msg(msg: bot_api.BatchCompleted) -> Path
             )
 
 
-async def background_delete(app):
+@routes.get("/delete_synced_dirs")
+async def delete_dirs(request: aiohttp.web_request):
     try:
-        sync_context: SyncContext = app["sync_context"]
-        while True:
+        sync_context: SyncContext = request.app["sync_context"]
 
-            # Get list of non-deleted datasets
-            base_dir = sync_context.ad_base_dir
+        base_dir = sync_context.ad_base_dir
 
-            new_data_dirs = [x.parent for x in base_dir.glob("*/*#*/*/*.log")]
-            data_dir: Path
+        errors = False
+        for log_file_data_dir in base_dir.glob("*/*#*/*/*.log"):
+            data_dir = log_file_data_dir.parent
+            with sentry_sdk.configure_scope() as scope:
+                dump_dir = DumpDir(data_dir)
 
-            for data_dir in new_data_dirs:
-                with sentry_sdk.configure_scope() as scope:
-                    dump_dir = DumpDir(data_dir)
+                try:
+                    # Check Batch in db marked as synced before deletion
+                    # non-async django, may stall application.
 
+                    batch = Batch.objects.get(location__state_name=dump_dir.location,
+                                              start_timestamp=dump_dir.run_id,
+                                              server_hostname=dump_dir.host_hostname,
+                                              server_container=dump_dir.container_hostname,
+                                              )
+
+                except Exception as e:
+                    errors = True
+                    traceback.print_exc()
+                    continue
+
+                    # WARNING: Any batch marked as synced is assumed to have been properly synced to a known location.
+                if batch.synced:
+                    # Delete the directory
+                    print("Deleting:", dump_dir.path.as_posix())
+
+                    # Sanity check to make sure not deleting outside base ad dir
+                    if sync_context.ad_base_dir not in dump_dir.path.parents:
+                        print("tried to delete outside of ad dir:", dump_dir.path.as_posix())
+                        break
                     try:
-                        # Check Batch in db marked as synced before deletion
-                        # non-async django, may stall application.
+                        shutil.rmtree(dump_dir.path, ignore_errors=False)
+                    except PermissionError:
+                        print(f"Are you root? Failed to delete directory: {dump_dir.path}")
+                        raise
+                    print("deleted:", dump_dir.path.as_posix())
+    except Exception as e:
+        traceback.print_exc()
+        return web.Response(text=str(e), status=500)
 
-                        batch = Batch.objects.get(location__state_name=dump_dir.location,
-                                                  start_timestamp=dump_dir.run_id,
-                                                  server_hostname=dump_dir.host_hostname,
-                                                  server_container=dump_dir.container_hostname,
-                                                  )
+    if errors:
+        return web.Response(text="errors deleting 1+ directories", status=500)
+    else:
+        return web.Response(text="ok delete", status=200)
 
-                    except django.core.exceptions.ObjectDoesNotExist as e:
-                        raise e
-                    except django.core.exceptions.MultipleObjectsReturned as e:
-                        raise e
 
-                        # WARNING: Any batch marked as synced is assumed to have been properly synced to a known location.
-                    if batch.synced:
-                        # Delete the directory
-                        print("Deleting:", dump_dir.path.as_posix())
+async def background_delete(app):
+    server_address = app["socket_file"]
 
-                        # Sanity check to make sure not deleting outside base ad dir
-                        if sync_context.ad_base_dir not in dump_dir.path.parents:
-                            print("tried to delete outside of ad dir:", dump_dir.path.as_posix())
-                            break
-                        try:
-                            shutil.rmtree(dump_dir.path, ignore_errors=False)
-                        except PermissionError:
-                            print(f"Are you root? Failed to delete directory: {dump_dir.path}")
-                            raise
-                        print("deleted:", dump_dir.path.as_posix())
-            await asyncio.sleep(60)
-    except asyncio.CancelledError:
-        print("closing down background delete")
-        pass
+    while True:
+        print("Starting background delete")
+        try:
+            conn = aiohttp.UnixConnector(path=server_address)
+            timeout = aiohttp.ClientTimeout(total=300)
+            async with aiohttp.ClientSession(connector=conn, raise_for_status=True) as session:
+                # localhost substitutes for the socket file
+                async with session.get(f"http://localhost/delete_synced_dirs", timeout=timeout) as resp:
+                    print("delete resp:", resp.status, "delete text:", await resp.text())
+            await asyncio.sleep(60 * 60)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print("exception when deleting:", e)
+            traceback.print_exc()
+            raise e
 
 
 async def periodic_sync_ping(app):
@@ -326,13 +351,12 @@ async def periodic_sync_ping(app):
         print("Starting background sync")
         try:
             conn = aiohttp.UnixConnector(path=server_address)
-            timeout = aiohttp.ClientTimeout(total=5)
+            timeout = aiohttp.ClientTimeout(total=300)
             async with aiohttp.ClientSession(connector=conn, raise_for_status=True) as session:
-                print("start get")
                 # localhost substitutes for the socket file
                 async with session.get(f"http://localhost/reconstruct_all", timeout=timeout) as resp:
                     pass
-            await asyncio.sleep(60)
+            await asyncio.sleep(60 * 60)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -377,11 +401,15 @@ def reconstruct_completion_msg(dump_dir: DumpDir) -> BatchCompleted:
     returns a `BatchCompleted` message object"""
 
     # Hack for no metadata about number of bots ran
-    batch = Batch.objects.get(location__state_name=dump_dir.location,
+    try:
+        batch = Batch.objects.get(location__state_name=dump_dir.location,
                               start_timestamp=dump_dir.run_id,
                               server_hostname=dump_dir.host_hostname,
                               server_container=dump_dir.container_hostname,
                               )
+    except Batch.DoesNotExist as e:
+        print(f"Batch does not exist in db from directory: {dump_dir}")
+        raise e
 
     version: int = determine_ad_format_version(dump_dir.path)
 
@@ -417,13 +445,12 @@ async def reconstruct_all(request: aiohttp.web_request.Request):
     sync_context: SyncContext = request.app["sync_context"]
 
     # sync all batches regardless of age
-    force_sync = request.get("force_sync", "false")
+    force_sync = request.rel_url.query.get("force_sync", "false")
     if force_sync in ["false", "False", "0"]:
         force_sync = False
     elif force_sync in ["true", "True", "1"]:
         force_sync = True
     else:
-
         print(f"invalid option for force_sync: {force_sync}")
         force_sync = False
 
@@ -432,19 +459,26 @@ async def reconstruct_all(request: aiohttp.web_request.Request):
     new_data_dirs = [x.parent for x in base_dir.glob("*/*#*/*/*.log")]
     data_dir: Path
 
+    err = False
     for data_dir in new_data_dirs:
-        dump_dir = DumpDir(ad_dir=data_dir)
-        msg = reconstruct_completion_msg(dump_dir)
-        print(f"completion_msg: {msg.to_json()}")
+        try:
+            dump_dir = DumpDir(ad_dir=data_dir)
+            msg = reconstruct_completion_msg(dump_dir)
+            print(f"completion_msg: {msg.to_json()}")
 
-        if not batch_is_old(msg) and not force_sync:
-            print("Skipping batch, not old enough")
+            if not batch_is_old(msg) and not force_sync:
+                print("Skipping batch, not old enough")
+                continue
+            print("directory syncing:", data_dir)
+            result = await sync_batch(ad_specific_dir=data_dir, completion_msg=msg, sync_context=sync_context)
+            print(result)
+        except Exception as e:
+            err = True
             continue
-        print("directory syncing:", data_dir)
-        result = await sync_batch(ad_specific_dir=data_dir, completion_msg=msg, sync_context=sync_context)
-        print(result)
-
-    return web.Response(text="OK Reconstruct and sync complete")
+    if err:
+        return web.Response(text="An error occurred syncing some batch(s)")
+    else:
+        return web.Response(text="OK Reconstruct and sync complete")
 
 
 def ad_dir_from_parts(base_dir: Path, location: str, host_hostname: str, container_hostname: str,
