@@ -216,6 +216,14 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
                       )
         batch.save()
         print("Creating batch which does not exist with completion msg:", completion_msg)
+    except Batch.MultipleObjectsReturned as e:
+        # use 1st batch
+        batch = Batch.objects.filter(location__state_name=completion_msg.location,
+                                  start_timestamp=completion_msg.run_id,
+                                  server_hostname=completion_msg.host_hostname,
+                                  server_container=completion_msg.hostname,
+                                  )[0]
+
     except Exception as e:
         raise e
     # check if already synced
@@ -294,11 +302,12 @@ async def delete_dirs(request: aiohttp.web_request):
                     # Check Batch in db marked as synced before deletion
                     # non-async django, may stall application.
 
-                    batch = Batch.objects.get(location__state_name=dump_dir.location,
+                    # Use 1st batch duplicate for determining if synced
+                    batch = Batch.objects.filter(location__state_name=dump_dir.location,
                                               start_timestamp=dump_dir.run_id,
                                               server_hostname=dump_dir.host_hostname,
                                               server_container=dump_dir.container_hostname,
-                                              )
+                                              )[0]
 
                 except Exception as e:
                     errors = True
@@ -424,7 +433,7 @@ def reconstruct_completion_msg(dump_dir: DumpDir) -> BatchCompleted:
                 jline = json.loads(line)
                 try:
                     num_bots = int(jline["num_bots"])
-                    print("batch:", logfile, "has", num_bots, "bot(s)")
+                    print("batch:", dump_dir, "has", num_bots, "bot(s)")
                     break
                 except KeyError:
                     continue
