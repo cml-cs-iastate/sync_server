@@ -64,13 +64,13 @@ class DumpDir:
 @dataclass()
 class SyncContext:
     # directory where ads are stored in
-    ad_base_dir: Path
+    ad_unsynced_local_base_dir: Path
     # hostname/ip to move ads to
-    storage_hostname: str
+    dest_storage_hostname: str
     # username to login to the server in
-    storage_user: str
+    dest_storage_user: str
     # base directory to copy ads into
-    storage_base_dir: Path
+    dest_storage_base_dir: Path
     # pubsub client
     publisher: pubsub_v1
     # pubsub topic
@@ -174,8 +174,8 @@ async def sync_directory(src: Path, sync_context: SyncContext) -> Union[BatchSyn
     rsync_commands = ["rsync", "-a", "--relative",
                       # example: /home/alex/github/dumps/./louisiana/node12.misc.iastate.edu#e6ede031d296/1564364031
                       ####src_base##########   ######################src################################
-                      f"{sync_context.ad_base_dir.as_posix()}/./{src.relative_to(sync_context.ad_base_dir).as_posix()}",
-                      f"{sync_context.storage_user}@{sync_context.storage_hostname}:{sync_context.storage_base_dir.as_posix()}"]
+                      f"{sync_context.ad_unsynced_local_base_dir.as_posix()}/./{src.relative_to(sync_context.ad_unsynced_local_base_dir).as_posix()}",
+                      f"{sync_context.dest_storage_user}@{sync_context.dest_storage_hostname}:{sync_context.dest_storage_base_dir.as_posix()}"]
     print("rsync commands:", rsync_commands)
     sync: suprocess.Process = await suprocess.create_subprocess_exec(*rsync_commands,
                                                                      stderr=asyncio.subprocess.PIPE,
@@ -208,8 +208,14 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
                                   server_container=completion_msg.hostname,
                                   )
     except Batch.DoesNotExist as e:
-        print("batch does not exist with completion msg:", completion_msg)
-        raise e
+        # Create new record of batch to sync
+        batch = Batch(location__state_name=completion_msg.location,
+                      start_timestamp=completion_msg.run_id,
+                      server_hostname=completion_msg.host_hostname,
+                      server_container=completion_msg.hostname,
+                      )
+        batch.save()
+        print("Creating batch which does not exist with completion msg:", completion_msg)
     except Exception as e:
         raise e
     # check if already synced
@@ -246,11 +252,12 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
 
 async def sync_single(request: aiohttp.web_request.Request):
     sync_context: SyncContext = request.app["sync_context"]
-    src_base = sync_context.ad_base_dir
+    src_base = sync_context.ad_unsynced_local_base_dir
     completion_msg: dict = await request.json()
     # Note, fix bot_api.from_json to take str, and a dict
     complete: bot_api.BatchCompleted = bot_api.BatchCompleted.from_json(json.dumps(completion_msg))
-    ad_specific_dir: DumpDir = DumpDir.from_completion_msg(base_dir=sync_context.ad_base_dir, completion_msg=complete)
+    ad_specific_dir: DumpDir = DumpDir.from_completion_msg(base_dir=sync_context.ad_unsynced_local_base_dir,
+                                                           completion_msg=complete)
     app.logger.info(f"syncing batch path: {ad_specific_dir.path.as_posix()}")
 
     print("syncing batch", complete.to_json())
@@ -275,7 +282,7 @@ async def delete_dirs(request: aiohttp.web_request):
     try:
         sync_context: SyncContext = request.app["sync_context"]
 
-        base_dir = sync_context.ad_base_dir
+        base_dir = sync_context.ad_unsynced_local_base_dir
 
         errors = False
         for log_file_data_dir in base_dir.glob("*/*#*/*/*.log"):
@@ -304,7 +311,7 @@ async def delete_dirs(request: aiohttp.web_request):
                     print("Deleting:", dump_dir.path.as_posix())
 
                     # Sanity check to make sure not deleting outside base ad dir
-                    if sync_context.ad_base_dir not in dump_dir.path.parents:
+                    if sync_context.ad_unsynced_local_base_dir not in dump_dir.path.parents:
                         print("tried to delete outside of ad dir:", dump_dir.path.as_posix())
                         break
                     try:
@@ -403,10 +410,10 @@ def reconstruct_completion_msg(dump_dir: DumpDir) -> BatchCompleted:
     # Hack for no metadata about number of bots ran
     try:
         batch = Batch.objects.get(location__state_name=dump_dir.location,
-                              start_timestamp=dump_dir.run_id,
-                              server_hostname=dump_dir.host_hostname,
-                              server_container=dump_dir.container_hostname,
-                              )
+                                  start_timestamp=dump_dir.run_id,
+                                  server_hostname=dump_dir.host_hostname,
+                                  server_container=dump_dir.container_hostname,
+                                  )
     except Batch.DoesNotExist as e:
         print(f"Batch does not exist in db from directory: {dump_dir}")
         raise e
@@ -454,7 +461,7 @@ async def reconstruct_all(request: aiohttp.web_request.Request):
         print(f"invalid option for force_sync: {force_sync}")
         force_sync = False
 
-    base_dir = sync_context.ad_base_dir
+    base_dir = sync_context.ad_unsynced_local_base_dir
 
     new_data_dirs = [x.parent for x in base_dir.glob("*/*#*/*/*.log")]
     data_dir: Path
@@ -487,13 +494,22 @@ def ad_dir_from_parts(base_dir: Path, location: str, host_hostname: str, contain
     return DumpDir(ad_dir=ad_dir)
 
 
+async def notify_of_untracked_batches(app: web.Application):
+    """Notify server of any missed batches which were not tracked"""
+    sync_context: SyncContext = app["sync_context"]
+    unsynced_dirs = [x.parent for x in sync_context.ad_unsynced_local_base_dir.glob("*/*#*/*/*.log")]
+    for unsynced_dir in unsynced_dirs:
+        dump_dir = DumpDir(unsynced_dir)
+        completion_msg = reconstruct_completion_msg(dump_dir)
+
+
 @routes.get('/sync/batch/{state}/{host_container}/{start_time}')
 async def sync_from_url(request: aiohttp.web_request.Request):
     location = request.match_info["state"]
     server_hostname, container_hostname = request.match_info["host_container"].split("#")
     start_time = request.match_info["start_time"]
     sync_context: SyncContext = request.app["sync_context"]
-    base_ad_dir = sync_context.ad_base_dir
+    base_ad_dir = sync_context.ad_unsynced_local_base_dir
     ad_dir: DumpDir = ad_dir_from_parts(base_ad_dir, location=location, host_hostname=server_hostname,
                                         container_hostname=container_hostname, start_time=start_time)
 
