@@ -414,9 +414,20 @@ def reconstruct_completion_msg(dump_dir: DumpDir) -> BatchCompleted:
                                   server_hostname=dump_dir.host_hostname,
                                   server_container=dump_dir.container_hostname,
                                   )
+        num_bots = batch.total_bots
     except Batch.DoesNotExist as e:
-        print(f"Batch does not exist in db from directory: {dump_dir}")
-        raise e
+        logfile = next(dump_dir.path.glob("bots_*.log"))
+        external_ip = "0.0.0.0"
+
+        with logfile.open() as f:
+            for line in f:
+                jline = json.loads(line)
+                try:
+                    num_bots = int(jline["num_bots"])
+                    print("batch:", logfile, "has", num_bots, "bot(s)")
+                    break
+                except KeyError:
+                    continue
 
     version: int = determine_ad_format_version(dump_dir.path)
 
@@ -433,13 +444,15 @@ def reconstruct_completion_msg(dump_dir: DumpDir) -> BatchCompleted:
         raise NotImplemented(f"version: `{version}` not handled")
 
     non_ads = count_non_ad_requests(dump_dir.path)
-    external_ip = batch.external_ip
     total_requests = ad_count + non_ads
     last_request = last_request_time(dump_dir.path)
-    video_list_size = batch.video_list_size
+
+    # Count size of the video list bots watched
+    with open("political_videos.csv") as f:
+        video_list_size = sum(1 for _ in f)
     completion_msg = BatchCompleted(status=BatchCompletionStatus.COMPLETE, hostname=dump_dir.container_hostname,
                                     run_id=dump_dir.run_id,
-                                    external_ip=external_ip, bots_in_batch=batch.total_bots,
+                                    external_ip=external_ip, bots_in_batch=num_bots,
                                     requests=total_requests, host_hostname=dump_dir.host_hostname,
                                     location=dump_dir.location, ads_found=ad_count, timestamp=last_request,
                                     video_list_size=video_list_size,
