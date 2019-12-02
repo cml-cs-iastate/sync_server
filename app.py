@@ -562,10 +562,10 @@ def init_server() -> web.Application:
     publisher = pubsub_v1.PublisherClient()
     topic: str = publisher.topic_path(project_id, topic=topic_batch)
 
-    app["sync_context"] = SyncContext(ad_base_dir=src_base,
-                                      storage_base_dir=dest_directory,
-                                      storage_hostname=dest_host,
-                                      storage_user=server_user,
+    app["sync_context"] = SyncContext(ad_unsynced_local_base_dir=src_base,
+                                      dest_storage_base_dir=dest_directory,
+                                      dest_storage_hostname=dest_host,
+                                      dest_storage_user=server_user,
                                       publisher=publisher,
                                       publisher_topic=topic, )
 
