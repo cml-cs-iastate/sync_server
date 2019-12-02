@@ -303,11 +303,15 @@ async def delete_dirs(request: aiohttp.web_request):
                     # non-async django, may stall application.
 
                     # Use 1st batch duplicate for determining if synced
-                    batch = Batch.objects.filter(location__state_name=dump_dir.location,
+                    try:
+                        batch = Batch.objects.filter(location__state_name=dump_dir.location,
                                               start_timestamp=dump_dir.run_id,
                                               server_hostname=dump_dir.host_hostname,
                                               server_container=dump_dir.container_hostname,
                                               )[0]
+                    except IndexError:
+                        print(f"{dump_dir}, is not a batch")
+                        continue
 
                 except Exception as e:
                     errors = True
