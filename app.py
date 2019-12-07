@@ -169,7 +169,6 @@ def batch_is_old(completion_msg: BatchCompleted):
 async def test_check(request: aiohttp.web_request.Request):
     return web.Response(text="OK")
 
-
 async def sync_directory(src: Path, sync_context: SyncContext) -> Union[BatchSyncComplete, bot_api.BatchSyncError]:
     rsync_commands = ["rsync", "-a", "--relative",
                       # example: /home/alex/github/dumps/./louisiana/node12.misc.iastate.edu#e6ede031d296/1564364031
@@ -363,7 +362,6 @@ async def background_delete(app):
             traceback.print_exc()
             raise e
 
-
 async def periodic_sync_ping(app):
     """Periodically check for unsynced data. Sync it."""
     server_address = app["socket_file"]
@@ -385,18 +383,42 @@ async def periodic_sync_ping(app):
             raise e
 
 
+async def periodic_sync_unprocessed(app):
+    """Periodically check for unsynced data. Sync it."""
+    server_address = app["socket_file"]
+    while True:
+        print("Starting background sync unprocessed")
+        try:
+            conn = aiohttp.UnixConnector(path=server_address)
+            timeout = aiohttp.ClientTimeout(total=300)
+            async with aiohttp.ClientSession(connector=conn, raise_for_status=True) as session:
+                # localhost substitutes for the socket file
+                async with session.get(f"http://localhost/sync_unprocessed", timeout=timeout) as resp:
+                    pass
+            await asyncio.sleep(60 * 60)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print("exception", e)
+            traceback.print_exc()
+            raise e
+
+
 async def start_background_tasks(app):
     loop = asyncio.get_running_loop()
-    app['periodic_delete'] = loop.create_task(background_delete(app))
-    app['periodic_sync'] = loop.create_task(periodic_sync_ping(app))
+    #app['periodic_delete'] = loop.create_task(background_delete(app))
+    #app['periodic_sync'] = loop.create_task(periodic_sync_ping(app))
+    app['periodic_sync_unprocessed'] = loop.create_task(periodic_sync_unprocessed(app))
 
 
 async def cleanup_background_tasks(app):
     app["periodic_delete"].cancel()
     app["periodic_sync"].cancel()
+    app["periodic_sync_unprocessed"].cancel()
 
     await app["periodic_delete"]
     await app["periodic_sync"]
+    await app["periodic_sync_unprocessed"]
 
 
 def count_json_files(ad_dir: pathlib.Path) -> int:
@@ -562,6 +584,7 @@ def init_server() -> web.Application:
                     web.get("/test", test_check),
                     web.post("/single", sync_single),
                     web.get("/reconstruct_all", reconstruct_all),
+                    web.get("/sync_unprocessed", sync_unprocessed),
                     ])
     app.add_routes(routes)
 
@@ -613,6 +636,31 @@ def init_server() -> web.Application:
     app["sock"] = sock
 
     return app
+
+
+async def sync_unprocessed(request: aiohttp.web_request.Request):
+    _ = await request.text()
+    sync_context: SyncContext = request.app["sync_context"]
+
+    base_dir = sync_context.ad_unsynced_local_base_dir
+
+    new_data_dirs = [x.parent for x in base_dir.glob("*/*#*/*/*.log")]
+    data_dir: Path
+
+    err = False
+    for data_dir in new_data_dirs:
+        try:
+            print("directory syncing:", data_dir)
+            result = await sync_directory(src=data_dir, sync_context=sync_context)
+            print("sync result", result, data_dir.as_posix())
+        except Exception as e:
+            err = True
+            print(e, data_dir.as_posix())
+            continue
+    if err:
+        return web.Response(text="An error occurred syncing some batch(s)")
+    else:
+        return web.Response(text="OK Reconstruct and sync complete")
 
 
 if __name__ == "__main__":
