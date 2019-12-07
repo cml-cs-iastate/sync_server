@@ -33,7 +33,6 @@ import urllib
 
 routes = web.RouteTableDef()
 
-
 class DumpFile:
     def __init__(self, filename: pathlib.Path):
         (self.bot_name,
@@ -159,11 +158,21 @@ def messages_from_file(file: pathlib.Path) -> List[BatchSynced]:
     return [BatchSynced.from_json(message) for message in messages]
 
 
-def batch_is_old(completion_msg: BatchCompleted):
-    age_of_batch = datetime.now() - datetime.utcfromtimestamp(completion_msg.run_id)
-    age_hours_threshold = 24 * 1.25
+def batch_is_old_using_dumpdir(dump_dir: DumpDir) -> bool:
+    start_time = dump_dir.run_id
+    return batch_is_old(start_time)
+
+
+def batch_is_old_using_completion_msg(completion_msg: BatchCompleted) -> bool:
+    start_time = completion_msg.run_id
+    return batch_is_old(start_time)
+
+def batch_is_old(start_time: int) -> bool:
+    age_of_batch = datetime.now() - datetime.utcfromtimestamp(start_time)
+    age_hours_threshold = 24
     batch_age_hours = age_of_batch.days * 24 + age_of_batch.seconds / 60 / 60
     return batch_age_hours >= age_hours_threshold
+
 
 
 async def test_check(request: aiohttp.web_request.Request):
@@ -521,8 +530,8 @@ async def reconstruct_all(request: aiohttp.web_request.Request):
             msg = reconstruct_completion_msg(dump_dir)
             print(f"completion_msg: {msg.to_json()}")
 
-            if not batch_is_old(msg) and not force_sync:
-                print("Skipping batch, not old enough")
+            if not batch_is_old_using_completion_msg(msg) and not force_sync:
+                print("Skipping batch, not old enough", dump_dir.path)
                 continue
             print("directory syncing:", data_dir)
             result = await sync_batch(ad_specific_dir=data_dir, completion_msg=msg, sync_context=sync_context)
@@ -638,9 +647,23 @@ def init_server() -> web.Application:
     return app
 
 
+def true_str(value: str) -> Optional[bool]:
+    if value in ["false", "False", "0"]:
+        return False
+    elif value in ["true", "True", "1"]:
+        return True
+    else:
+        return None
+
+
 async def sync_unprocessed(request: aiohttp.web_request.Request):
     _ = await request.text()
     sync_context: SyncContext = request.app["sync_context"]
+
+    force_sync = request.rel_url.query.get("force_sync", "false")
+    force_sync = true_str(force_sync)
+    if force_sync is None:
+        force_sync = False
 
     base_dir = sync_context.ad_unsynced_local_base_dir
 
@@ -649,8 +672,17 @@ async def sync_unprocessed(request: aiohttp.web_request.Request):
 
     err = False
     for data_dir in new_data_dirs:
+        dump_dir = DumpDir(data_dir)
         try:
-            print("directory syncing:", data_dir)
+            if not batch_is_old_using_dumpdir(dump_dir) and not force_sync:
+                print("Skipping batch, not old enough", data_dir.as_posix())
+                continue
+
+            print("Marking directory as done with batch", dump_dir.path.as_posix())
+            data_dir.joinpath("done").touch()
+            print("Marked directory as done with batch", data_dir.as_posix())
+
+            print("directory syncing:", data_dir.as_posix())
             result = await sync_directory(src=data_dir, sync_context=sync_context)
             print("sync result", result, data_dir.as_posix())
         except Exception as e:
@@ -660,7 +692,7 @@ async def sync_unprocessed(request: aiohttp.web_request.Request):
     if err:
         return web.Response(text="An error occurred syncing some batch(s)")
     else:
-        return web.Response(text="OK Reconstruct and sync complete")
+        return web.Response(text="OK sync complete")
 
 
 if __name__ == "__main__":
