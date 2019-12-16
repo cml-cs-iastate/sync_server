@@ -179,7 +179,7 @@ async def test_check(request: aiohttp.web_request.Request):
     return web.Response(text="OK")
 
 async def sync_directory(src: Path, sync_context: SyncContext) -> Union[BatchSyncComplete, bot_api.BatchSyncError]:
-    rsync_commands = ["rsync", "-a", "--relative", "--remove-source-files"
+    rsync_commands = ["rsync","--remove-source-files", "-a", "--relative",
                       # example: /home/alex/github/dumps/./louisiana/node12.misc.iastate.edu#e6ede031d296/1564364031
                       ####src_base##########   ######################src################################
                       f"{sync_context.ad_unsynced_local_base_dir.as_posix()}/./{src.relative_to(sync_context.ad_unsynced_local_base_dir).as_posix()}",
