@@ -378,18 +378,19 @@ async def periodic_sync_unprocessed(app):
         print("Starting background sync unprocessed")
         try:
             conn = aiohttp.UnixConnector(path=server_address)
-            timeout = aiohttp.ClientTimeout(total=300)
+            timeout = aiohttp.ClientTimeout(total=600)
             async with aiohttp.ClientSession(connector=conn, raise_for_status=True) as session:
                 # localhost substitutes for the socket file
                 async with session.get(f"http://localhost/sync_unprocessed", timeout=timeout) as resp:
                     pass
-            await asyncio.sleep(60 * 60)
+            await asyncio.sleep(60 * 30)
         except asyncio.CancelledError:
             break
+        except asyncio.TimeoutError:
+            print("Timeout 1hr syncing data: ", timeout)
         except Exception as e:
-            print("exception", e)
             traceback.print_exc()
-            raise e
+            raise e from None
 
 
 async def start_background_tasks(app):
