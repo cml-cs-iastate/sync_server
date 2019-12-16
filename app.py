@@ -179,7 +179,7 @@ async def test_check(request: aiohttp.web_request.Request):
     return web.Response(text="OK")
 
 async def sync_directory(src: Path, sync_context: SyncContext) -> Union[BatchSyncComplete, bot_api.BatchSyncError]:
-    rsync_commands = ["rsync", "-a", "--relative",
+    rsync_commands = ["rsync", "-a", "--relative", "--remove-source-files"
                       # example: /home/alex/github/dumps/./louisiana/node12.misc.iastate.edu#e6ede031d296/1564364031
                       ####src_base##########   ######################src################################
                       f"{sync_context.ad_unsynced_local_base_dir.as_posix()}/./{src.relative_to(sync_context.ad_unsynced_local_base_dir).as_posix()}",
@@ -370,27 +370,6 @@ async def background_delete(app):
             print("exception when deleting:", e)
             traceback.print_exc()
             raise e
-
-async def periodic_sync_ping(app):
-    """Periodically check for unsynced data. Sync it."""
-    server_address = app["socket_file"]
-    while True:
-        print("Starting background sync")
-        try:
-            conn = aiohttp.UnixConnector(path=server_address)
-            timeout = aiohttp.ClientTimeout(total=300)
-            async with aiohttp.ClientSession(connector=conn, raise_for_status=True) as session:
-                # localhost substitutes for the socket file
-                async with session.get(f"http://localhost/reconstruct_all", timeout=timeout) as resp:
-                    pass
-            await asyncio.sleep(60 * 60)
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            print("exception", e)
-            traceback.print_exc()
-            raise e
-
 
 async def periodic_sync_unprocessed(app):
     """Periodically check for unsynced data. Sync it."""
