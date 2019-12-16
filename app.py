@@ -658,13 +658,16 @@ async def sync_unprocessed(request: aiohttp.web_request.Request):
                 print("Skipping batch, not old enough", data_dir.as_posix())
                 continue
 
-            print("Marking directory as done with batch", dump_dir.path.as_posix())
-            data_dir.joinpath("done").touch()
-            print("Marked directory as done with batch", data_dir.as_posix())
 
             print("directory syncing:", data_dir.as_posix())
             result = await sync_directory(src=data_dir, sync_context=sync_context)
             print("sync result", result, data_dir.as_posix())
+            print("Marking directory as done with batch", dump_dir.path.as_posix())
+            data_dir.joinpath("done").touch()
+            print("Marked directory as done with batch", data_dir.as_posix())
+            result = await sync_directory(src=data_dir, sync_context=sync_context)
+            print("directory syncing:done file", data_dir.as_posix())
+            print("sync result done", result, data_dir.as_posix())
         except Exception as e:
             err = True
             print(e, data_dir.as_posix())
