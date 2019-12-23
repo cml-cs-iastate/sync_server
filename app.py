@@ -662,12 +662,27 @@ async def sync_unprocessed(request: aiohttp.web_request.Request):
             print("directory syncing:", data_dir.as_posix())
             result = await sync_directory(src=data_dir, sync_context=sync_context)
             print("sync result", result, data_dir.as_posix())
+            result = await sync_directory(src=data_dir, sync_context=sync_context)
+            if result == bot_api.BatchSyncError:
+                print("error syncing batch: ", result)
+                continue
             print("Marking directory as done with batch", dump_dir.path.as_posix())
             data_dir.joinpath("done").touch()
             print("Marked directory as done with batch", data_dir.as_posix())
-            result = await sync_directory(src=data_dir, sync_context=sync_context)
             print("directory syncing:done file", data_dir.as_posix())
             print("sync result done", result, data_dir.as_posix())
+
+            msg = bot_api.BatchSynced(batch_info=completion_msg,
+                                      sync_result=result)
+
+            print("sync msg: ")
+            print(msg.to_json())
+
+            # send sync event
+
+            publisher: pubsub_v1 = sync_context.publisher
+            publisher.publish(sync_context.publisher_topic, data=msg.to_json().encode("utf-8"))
+
         except Exception as e:
             err = True
             print(e, data_dir.as_posix())
