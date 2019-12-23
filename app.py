@@ -32,6 +32,8 @@ import traceback
 import urllib
 
 routes = web.RouteTableDef()
+from logging import getLogger
+logger = getLogger(__name__)
 
 class DumpFile:
     def __init__(self, filename: pathlib.Path):
@@ -178,13 +180,14 @@ def batch_is_old(start_time: int) -> bool:
 async def test_check(request: aiohttp.web_request.Request):
     return web.Response(text="OK")
 
+
 async def sync_directory(src: Path, sync_context: SyncContext) -> Union[BatchSyncComplete, bot_api.BatchSyncError]:
-    rsync_commands = ["rsync","--remove-source-files", "-a", "--relative",
+    rsync_commands = ["rsync", "-a", "--relative",
                       # example: /home/alex/github/dumps/./louisiana/node12.misc.iastate.edu#e6ede031d296/1564364031
                       ####src_base##########   ######################src################################
                       f"{sync_context.ad_unsynced_local_base_dir.as_posix()}/./{src.relative_to(sync_context.ad_unsynced_local_base_dir).as_posix()}",
                       f"{sync_context.dest_storage_user}@{sync_context.dest_storage_hostname}:{sync_context.dest_storage_base_dir.as_posix()}"]
-    print("rsync commands:", rsync_commands)
+    logger.info("rsync commands:", str(rsync_commands))
     sync: suprocess.Process = await suprocess.create_subprocess_exec(*rsync_commands,
                                                                      stderr=asyncio.subprocess.PIPE,
                                                                      stdout=asyncio.subprocess.PIPE,
@@ -358,7 +361,7 @@ async def background_delete(app):
         print("Starting background delete")
         try:
             conn = aiohttp.UnixConnector(path=server_address)
-            timeout = aiohttp.ClientTimeout(total=300)
+            timeout = aiohttp.ClientTimeout(total=600)
             async with aiohttp.ClientSession(connector=conn, raise_for_status=True) as session:
                 # localhost substitutes for the socket file
                 async with session.get(f"http://localhost/delete_synced_dirs", timeout=timeout) as resp:
@@ -395,18 +398,18 @@ async def periodic_sync_unprocessed(app):
 
 async def start_background_tasks(app):
     loop = asyncio.get_running_loop()
-    #app['periodic_delete'] = loop.create_task(background_delete(app))
+    app['periodic_delete'] = loop.create_task(background_delete(app))
     #app['periodic_sync'] = loop.create_task(periodic_sync_ping(app))
     app['periodic_sync_unprocessed'] = loop.create_task(periodic_sync_unprocessed(app))
 
 
 async def cleanup_background_tasks(app):
     app["periodic_delete"].cancel()
-    app["periodic_sync"].cancel()
+    #app["periodic_sync"].cancel()
     app["periodic_sync_unprocessed"].cancel()
 
     await app["periodic_delete"]
-    await app["periodic_sync"]
+    #await app["periodic_sync"]
     await app["periodic_sync_unprocessed"]
 
 
@@ -438,6 +441,7 @@ def reconstruct_completion_msg(dump_dir: DumpDir) -> BatchCompleted:
                                   server_hostname=dump_dir.host_hostname,
                                   server_container=dump_dir.container_hostname,
                                   )
+        external_ip = batch.external_ip
         num_bots = batch.total_bots
     except Batch.DoesNotExist as e:
         logfile = next(dump_dir.path.glob("bots_*.log"))
@@ -472,7 +476,7 @@ def reconstruct_completion_msg(dump_dir: DumpDir) -> BatchCompleted:
     last_request = last_request_time(dump_dir.path)
 
     # Count size of the video list bots watched
-    with open("political_videos.csv") as f:
+    with dump_dir.path.joinpath("political_videos.csv").open() as f:
         video_list_size = sum(1 for _ in f)
     completion_msg = BatchCompleted(status=BatchCompletionStatus.COMPLETE, hostname=dump_dir.container_hostname,
                                     run_id=dump_dir.run_id,
@@ -561,7 +565,7 @@ async def sync_from_url(request: aiohttp.web_request.Request):
 
 def init_server() -> web.Application:
     stdio_handler = logging.StreamHandler()
-    stdio_handler.setLevel(logging.INFO)
+    stdio_handler.setLevel(logging.DEBUG)
     _logger = logging.getLogger('aiohttp.access')
     _logger.addHandler(stdio_handler)
     _logger.setLevel(logging.DEBUG)
@@ -648,44 +652,44 @@ async def sync_unprocessed(request: aiohttp.web_request.Request):
     base_dir = sync_context.ad_unsynced_local_base_dir
 
     new_data_dirs = [x.parent for x in base_dir.glob("*/*#*/*/*.log")]
+    request.app.logger.debug(f"base_dir={base_dir.as_posix()}, unscanned dirs: {new_data_dirs}")
     data_dir: Path
 
     err = False
     for data_dir in new_data_dirs:
+        request.app.logger.debug(f"Scanning directory:, batch_dir={data_dir.as_posix()}")
         dump_dir = DumpDir(data_dir)
+        completed_already = dump_dir.path.joinpath("done").exists()
         try:
-            if not batch_is_old_using_dumpdir(dump_dir) and not force_sync:
-                print("Skipping batch, not old enough", data_dir.as_posix())
+            if not completed_already or batch_is_old_using_dumpdir(dump_dir) and not force_sync:
+                request.app.logger.info(f"Skipping batch, not old enough, batch_dir={data_dir.as_posix()}")
                 continue
+            request.app.logger.info(f"Marking directory as done with batch, batch_dir={dump_dir.path.as_posix()}")
+            data_dir.joinpath("done").touch()
+            request.app.logger.info(f"Marked directory as done with batch, batch_dir={data_dir.as_posix()}")
 
+            completion_msg = reconstruct_completion_msg(dump_dir)
 
-            print("directory syncing:", data_dir.as_posix())
+            request.app.logger.info(f"directory syncing:, batch_dir={data_dir.as_posix()}")
             result = await sync_directory(src=data_dir, sync_context=sync_context)
-            print("sync result", result, data_dir.as_posix())
+            request.app.logger.info(f"sync result, result={result}, batch_dir={data_dir.as_posix()}")
             result = await sync_directory(src=data_dir, sync_context=sync_context)
             if result == bot_api.BatchSyncError:
-                print("error syncing batch: ", result)
+                request.app.logger.error(f"error syncing batch:, result={result}")
                 continue
-            print("Marking directory as done with batch", dump_dir.path.as_posix())
-            data_dir.joinpath("done").touch()
-            print("Marked directory as done with batch", data_dir.as_posix())
-            print("directory syncing:done file", data_dir.as_posix())
-            print("sync result done", result, data_dir.as_posix())
 
             msg = bot_api.BatchSynced(batch_info=completion_msg,
                                       sync_result=result)
 
-            print("sync msg: ")
-            print(msg.to_json())
+            request.app.logger.info(f"sync msg:, msg={msg.to_json()}")
 
             # send sync event
-
             publisher: pubsub_v1 = sync_context.publisher
             publisher.publish(sync_context.publisher_topic, data=msg.to_json().encode("utf-8"))
-
+            request.app.logger.info(f"published sync msg")
         except Exception as e:
             err = True
-            print(e, data_dir.as_posix())
+            request.app.logger.exception(e, extra={"batch_dir": data_dir.as_posix()})
             continue
     if err:
         return web.Response(text="An error occurred syncing some batch(s)")
