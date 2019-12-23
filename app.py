@@ -33,7 +33,6 @@ import urllib
 
 routes = web.RouteTableDef()
 
-
 class DumpFile:
     def __init__(self, filename: pathlib.Path):
         (self.bot_name,
@@ -159,19 +158,28 @@ def messages_from_file(file: pathlib.Path) -> List[BatchSynced]:
     return [BatchSynced.from_json(message) for message in messages]
 
 
-def batch_is_old(completion_msg: BatchCompleted):
-    age_of_batch = datetime.now() - datetime.utcfromtimestamp(completion_msg.run_id)
-    age_hours_threshold = 24 * 1.25
+def batch_is_old_using_dumpdir(dump_dir: DumpDir) -> bool:
+    start_time = dump_dir.run_id
+    return batch_is_old(start_time)
+
+
+def batch_is_old_using_completion_msg(completion_msg: BatchCompleted) -> bool:
+    start_time = completion_msg.run_id
+    return batch_is_old(start_time)
+
+def batch_is_old(start_time: int) -> bool:
+    age_of_batch = datetime.now() - datetime.utcfromtimestamp(start_time)
+    age_hours_threshold = 24
     batch_age_hours = age_of_batch.days * 24 + age_of_batch.seconds / 60 / 60
     return batch_age_hours >= age_hours_threshold
+
 
 
 async def test_check(request: aiohttp.web_request.Request):
     return web.Response(text="OK")
 
-
 async def sync_directory(src: Path, sync_context: SyncContext) -> Union[BatchSyncComplete, bot_api.BatchSyncError]:
-    rsync_commands = ["rsync", "-a", "--relative",
+    rsync_commands = ["rsync","--remove-source-files", "-a", "--relative",
                       # example: /home/alex/github/dumps/./louisiana/node12.misc.iastate.edu#e6ede031d296/1564364031
                       ####src_base##########   ######################src################################
                       f"{sync_context.ad_unsynced_local_base_dir.as_posix()}/./{src.relative_to(sync_context.ad_unsynced_local_base_dir).as_posix()}",
@@ -216,6 +224,14 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
                       )
         batch.save()
         print("Creating batch which does not exist with completion msg:", completion_msg)
+    except Batch.MultipleObjectsReturned as e:
+        # use 1st batch
+        batch = Batch.objects.filter(location__state_name=completion_msg.location,
+                                  start_timestamp=completion_msg.run_id,
+                                  server_hostname=completion_msg.host_hostname,
+                                  server_container=completion_msg.hostname,
+                                  )[0]
+
     except Exception as e:
         raise e
     # check if already synced
@@ -294,11 +310,16 @@ async def delete_dirs(request: aiohttp.web_request):
                     # Check Batch in db marked as synced before deletion
                     # non-async django, may stall application.
 
-                    batch = Batch.objects.get(location__state_name=dump_dir.location,
+                    # Use 1st batch duplicate for determining if synced
+                    try:
+                        batch = Batch.objects.filter(location__state_name=dump_dir.location,
                                               start_timestamp=dump_dir.run_id,
                                               server_hostname=dump_dir.host_hostname,
                                               server_container=dump_dir.container_hostname,
-                                              )
+                                              )[0]
+                    except IndexError:
+                        print(f"{dump_dir}, is not a batch")
+                        continue
 
                 except Exception as e:
                     errors = True
@@ -350,40 +371,43 @@ async def background_delete(app):
             traceback.print_exc()
             raise e
 
-
-async def periodic_sync_ping(app):
+async def periodic_sync_unprocessed(app):
     """Periodically check for unsynced data. Sync it."""
     server_address = app["socket_file"]
     while True:
-        print("Starting background sync")
+        print("Starting background sync unprocessed")
         try:
             conn = aiohttp.UnixConnector(path=server_address)
-            timeout = aiohttp.ClientTimeout(total=300)
+            timeout = aiohttp.ClientTimeout(total=600)
             async with aiohttp.ClientSession(connector=conn, raise_for_status=True) as session:
                 # localhost substitutes for the socket file
-                async with session.get(f"http://localhost/reconstruct_all", timeout=timeout) as resp:
+                async with session.get(f"http://localhost/sync_unprocessed", timeout=timeout) as resp:
                     pass
-            await asyncio.sleep(60 * 60)
+            await asyncio.sleep(60 * 30)
         except asyncio.CancelledError:
             break
+        except asyncio.TimeoutError:
+            print("Timeout 1hr syncing data: ", timeout)
         except Exception as e:
-            print("exception", e)
             traceback.print_exc()
-            raise e
+            raise e from None
 
 
 async def start_background_tasks(app):
     loop = asyncio.get_running_loop()
-    app['periodic_delete'] = loop.create_task(background_delete(app))
-    app['periodic_sync'] = loop.create_task(periodic_sync_ping(app))
+    #app['periodic_delete'] = loop.create_task(background_delete(app))
+    #app['periodic_sync'] = loop.create_task(periodic_sync_ping(app))
+    app['periodic_sync_unprocessed'] = loop.create_task(periodic_sync_unprocessed(app))
 
 
 async def cleanup_background_tasks(app):
     app["periodic_delete"].cancel()
     app["periodic_sync"].cancel()
+    app["periodic_sync_unprocessed"].cancel()
 
     await app["periodic_delete"]
     await app["periodic_sync"]
+    await app["periodic_sync_unprocessed"]
 
 
 def count_json_files(ad_dir: pathlib.Path) -> int:
@@ -414,9 +438,20 @@ def reconstruct_completion_msg(dump_dir: DumpDir) -> BatchCompleted:
                                   server_hostname=dump_dir.host_hostname,
                                   server_container=dump_dir.container_hostname,
                                   )
+        num_bots = batch.total_bots
     except Batch.DoesNotExist as e:
-        print(f"Batch does not exist in db from directory: {dump_dir}")
-        raise e
+        logfile = next(dump_dir.path.glob("bots_*.log"))
+        external_ip = "0.0.0.0"
+
+        with logfile.open() as f:
+            for line in f:
+                jline = json.loads(line)
+                try:
+                    num_bots = int(jline["num_bots"])
+                    print("batch:", dump_dir, "has", num_bots, "bot(s)")
+                    break
+                except KeyError:
+                    continue
 
     version: int = determine_ad_format_version(dump_dir.path)
 
@@ -433,13 +468,15 @@ def reconstruct_completion_msg(dump_dir: DumpDir) -> BatchCompleted:
         raise NotImplemented(f"version: `{version}` not handled")
 
     non_ads = count_non_ad_requests(dump_dir.path)
-    external_ip = batch.external_ip
     total_requests = ad_count + non_ads
     last_request = last_request_time(dump_dir.path)
-    video_list_size = batch.video_list_size
+
+    # Count size of the video list bots watched
+    with open("political_videos.csv") as f:
+        video_list_size = sum(1 for _ in f)
     completion_msg = BatchCompleted(status=BatchCompletionStatus.COMPLETE, hostname=dump_dir.container_hostname,
                                     run_id=dump_dir.run_id,
-                                    external_ip=external_ip, bots_in_batch=batch.total_bots,
+                                    external_ip=external_ip, bots_in_batch=num_bots,
                                     requests=total_requests, host_hostname=dump_dir.host_hostname,
                                     location=dump_dir.location, ads_found=ad_count, timestamp=last_request,
                                     video_list_size=video_list_size,
@@ -473,8 +510,8 @@ async def reconstruct_all(request: aiohttp.web_request.Request):
             msg = reconstruct_completion_msg(dump_dir)
             print(f"completion_msg: {msg.to_json()}")
 
-            if not batch_is_old(msg) and not force_sync:
-                print("Skipping batch, not old enough")
+            if not batch_is_old_using_completion_msg(msg) and not force_sync:
+                print("Skipping batch, not old enough", dump_dir.path)
                 continue
             print("directory syncing:", data_dir)
             result = await sync_batch(ad_specific_dir=data_dir, completion_msg=msg, sync_context=sync_context)
@@ -536,6 +573,7 @@ def init_server() -> web.Application:
                     web.get("/test", test_check),
                     web.post("/single", sync_single),
                     web.get("/reconstruct_all", reconstruct_all),
+                    web.get("/sync_unprocessed", sync_unprocessed),
                     ])
     app.add_routes(routes)
 
@@ -562,10 +600,10 @@ def init_server() -> web.Application:
     publisher = pubsub_v1.PublisherClient()
     topic: str = publisher.topic_path(project_id, topic=topic_batch)
 
-    app["sync_context"] = SyncContext(ad_base_dir=src_base,
-                                      storage_base_dir=dest_directory,
-                                      storage_hostname=dest_host,
-                                      storage_user=server_user,
+    app["sync_context"] = SyncContext(ad_unsynced_local_base_dir=src_base,
+                                      dest_storage_base_dir=dest_directory,
+                                      dest_storage_hostname=dest_host,
+                                      dest_storage_user=server_user,
                                       publisher=publisher,
                                       publisher_topic=topic, )
 
@@ -587,6 +625,57 @@ def init_server() -> web.Application:
     app["sock"] = sock
 
     return app
+
+
+def true_str(value: str) -> Optional[bool]:
+    if value in ["false", "False", "0"]:
+        return False
+    elif value in ["true", "True", "1"]:
+        return True
+    else:
+        return None
+
+
+async def sync_unprocessed(request: aiohttp.web_request.Request):
+    _ = await request.text()
+    sync_context: SyncContext = request.app["sync_context"]
+
+    force_sync = request.rel_url.query.get("force_sync", "false")
+    force_sync = true_str(force_sync)
+    if force_sync is None:
+        force_sync = False
+
+    base_dir = sync_context.ad_unsynced_local_base_dir
+
+    new_data_dirs = [x.parent for x in base_dir.glob("*/*#*/*/*.log")]
+    data_dir: Path
+
+    err = False
+    for data_dir in new_data_dirs:
+        dump_dir = DumpDir(data_dir)
+        try:
+            if not batch_is_old_using_dumpdir(dump_dir) and not force_sync:
+                print("Skipping batch, not old enough", data_dir.as_posix())
+                continue
+
+
+            print("directory syncing:", data_dir.as_posix())
+            result = await sync_directory(src=data_dir, sync_context=sync_context)
+            print("sync result", result, data_dir.as_posix())
+            print("Marking directory as done with batch", dump_dir.path.as_posix())
+            data_dir.joinpath("done").touch()
+            print("Marked directory as done with batch", data_dir.as_posix())
+            result = await sync_directory(src=data_dir, sync_context=sync_context)
+            print("directory syncing:done file", data_dir.as_posix())
+            print("sync result done", result, data_dir.as_posix())
+        except Exception as e:
+            err = True
+            print(e, data_dir.as_posix())
+            continue
+    if err:
+        return web.Response(text="An error occurred syncing some batch(s)")
+    else:
+        return web.Response(text="OK sync complete")
 
 
 if __name__ == "__main__":
