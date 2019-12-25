@@ -169,12 +169,12 @@ def batch_is_old_using_completion_msg(completion_msg: BatchCompleted) -> bool:
     start_time = completion_msg.run_id
     return batch_is_old(start_time)
 
+
 def batch_is_old(start_time: int) -> bool:
     age_of_batch = datetime.now() - datetime.utcfromtimestamp(start_time)
-    age_hours_threshold = 24
+    hours_threshold = 24
     batch_age_hours = age_of_batch.days * 24 + age_of_batch.seconds / 60 / 60
-    return batch_age_hours >= age_hours_threshold
-
+    return batch_age_hours >= hours_threshold
 
 
 async def test_check(request: aiohttp.web_request.Request):
@@ -659,9 +659,9 @@ async def sync_unprocessed(request: aiohttp.web_request.Request):
     for data_dir in new_data_dirs:
         request.app.logger.debug(f"Scanning directory:, batch_dir={data_dir.as_posix()}")
         dump_dir = DumpDir(data_dir)
-        completed_already = dump_dir.path.joinpath("done").exists()
+        marked_done = dump_dir.path.joinpath("done").exists()
         try:
-            if not completed_already or batch_is_old_using_dumpdir(dump_dir) and not force_sync:
+            if not marked_done and not batch_is_old_using_dumpdir(dump_dir) and not force_sync:
                 request.app.logger.info(f"Skipping batch, not old enough, batch_dir={data_dir.as_posix()}")
                 continue
             request.app.logger.info(f"Marking directory as done with batch, batch_dir={dump_dir.path.as_posix()}")
