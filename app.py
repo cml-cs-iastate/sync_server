@@ -77,6 +77,9 @@ class SyncContext:
     # pubsub topic
     publisher_topic: str
 
+def reset_db_connections():
+    from django import db
+    db.close_old_connections()
 
 def count_txt_files(ad_dir: pathlib.Path) -> int:
     """Ad format v3"""
@@ -359,6 +362,7 @@ async def background_delete(app):
 
     while True:
         print("Starting background delete")
+        reset_db_connections()
         try:
             conn = aiohttp.UnixConnector(path=server_address)
             timeout = aiohttp.ClientTimeout(total=600)
@@ -377,8 +381,10 @@ async def background_delete(app):
 async def periodic_sync_unprocessed(app):
     """Periodically check for unsynced data. Sync it."""
     server_address = app["socket_file"]
+
     while True:
         print("Starting background sync unprocessed")
+        reset_db_connections()
         try:
             conn = aiohttp.UnixConnector(path=server_address)
             timeout = aiohttp.ClientTimeout(total=600)
