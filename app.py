@@ -255,15 +255,15 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
 
     # send sync event
 
-    publisher: pubsub_v1 = sync_context.publisher
-
-    publisher.publish(sync_context.publisher_topic, data=msg.to_json().encode())
 
     if msg.data.kind == bot_api.BatchSyncStatus.ERROR:
         print("ERROR: ", msg.to_json())
         raise Exception("Error syncing batch: ", msg)
     elif msg.data.kind == bot_api.BatchSyncStatus.COMPLETE:
         print("No problems")
+        publisher: pubsub_v1 = sync_context.publisher
+
+        publisher.publish(sync_context.publisher_topic, data=msg.to_json().encode())
 
 
 async def sync_single(request: aiohttp.web_request.Request):
