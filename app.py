@@ -186,6 +186,8 @@ async def test_check(request: aiohttp.web_request.Request):
 
 async def sync_directory(src: Path, sync_context: SyncContext) -> Union[BatchSyncComplete, bot_api.BatchSyncError]:
     rsync_commands = ["rsync", "-a", "--relative",
+                      # can't set times/permissions/ownership on files when switch LSS mount to group instead of root
+                      "--no-t", "--no-perms", "--no-owner", "--no-group",
                       # example: /home/alex/github/dumps/./louisiana/node12.misc.iastate.edu#e6ede031d296/1564364031
                       ####src_base##########   ######################src################################
                       f"{sync_context.ad_unsynced_local_base_dir.as_posix()}/./{src.relative_to(sync_context.ad_unsynced_local_base_dir).as_posix()}",
