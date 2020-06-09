@@ -1,7 +1,5 @@
 FROM testcyads/base_os:0.3
 
-# Delete selenium userid and home dir
-RUN userdel -r seluser
 USER root
 RUN chmod -R 777 /root
 ENV HOME=/root
@@ -10,7 +8,6 @@ WORKDIR /root
 RUN mkdir app
 COPY requirements.txt .
 RUN python3.7 -m pip install --user --no-cache-dir -r requirements.txt
-# install bot_api from git
 
 
 RUN mkdir -p /root/.ssh
