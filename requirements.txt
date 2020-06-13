@@ -1,4 +1,5 @@
 git+git://github.com/cml-cs-iastate/bot_api@0.10
+git+git://github.com/cml-cs-iastate/CyadsProcessor@1.32.0
 google-cloud-pubsub == 1.5.0
 aiohttp[] >= 3.6.2
 django == 3.0.7
