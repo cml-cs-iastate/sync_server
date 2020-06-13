@@ -1,4 +1,4 @@
-FROM testcyads/base_os:0.3
+FROM python:3.8
 
 USER root
 RUN chmod -R 777 /root
@@ -6,8 +6,14 @@ ENV HOME=/root
 
 WORKDIR /root
 RUN mkdir app
+RUN apt-get update && apt-get install -y gcc
+RUN apt-get install -y rsync
+RUN rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+
 COPY requirements.txt .
-RUN python3.7 -m pip install --user --no-cache-dir -r requirements.txt
+RUN python3 -m pip install -U setuptools
+
+RUN python3 -m pip install --no-cache-dir -r requirements.txt
 
 
 RUN mkdir -p /root/.ssh
@@ -27,4 +33,4 @@ COPY --chown=root:root ./Cyads_pubsub.json /root/creds/Cyads-pubsub.json
 RUN mkdir -p app
 COPY . app
 
-CMD ["python3.7", "./app/app.py"]
+CMD ["python3", "./app/app.py"]
