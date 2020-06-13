@@ -10,6 +10,8 @@ import bot_api
 from aiohttp import web_request, web_response
 import asyncio.subprocess as suprocess
 import asyncio
+
+from asgiref.sync import sync_to_async, async_to_sync
 from google.cloud import pubsub_v1, pubsub
 import os
 import json
@@ -33,7 +35,9 @@ import urllib
 
 routes = web.RouteTableDef()
 from logging import getLogger
+
 logger = getLogger(__name__)
+
 
 class DumpFile:
     def __init__(self, filename: pathlib.Path):
@@ -77,9 +81,11 @@ class SyncContext:
     # pubsub topic
     publisher_topic: str
 
+
 def reset_db_connections():
     from django import db
     db.close_old_connections()
+
 
 def count_txt_files(ad_dir: pathlib.Path) -> int:
     """Ad format v3"""
@@ -186,6 +192,8 @@ async def test_check(request: aiohttp.web_request.Request):
 
 async def sync_directory(src: Path, sync_context: SyncContext) -> Union[BatchSyncComplete, bot_api.BatchSyncError]:
     rsync_commands = ["rsync", "-a", "--relative",
+                      # can't set times/permissions/ownership on files when switch LSS mount to group instead of root
+                      "--no-t", "--no-perms", "--no-owner", "--no-group",
                       # example: /home/alex/github/dumps/./louisiana/node12.misc.iastate.edu#e6ede031d296/1564364031
                       ####src_base##########   ######################src################################
                       f"{sync_context.ad_unsynced_local_base_dir.as_posix()}/./{src.relative_to(sync_context.ad_unsynced_local_base_dir).as_posix()}",
@@ -233,10 +241,10 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
     except Batch.MultipleObjectsReturned as e:
         # use 1st batch
         batch = Batch.objects.filter(location__state_name=completion_msg.location,
-                                  start_timestamp=completion_msg.run_id,
-                                  server_hostname=completion_msg.host_hostname,
-                                  server_container=completion_msg.hostname,
-                                  )[0]
+                                     start_timestamp=completion_msg.run_id,
+                                     server_hostname=completion_msg.host_hostname,
+                                     server_container=completion_msg.hostname,
+                                     )[0]
 
     except Exception as e:
         raise e
@@ -260,7 +268,6 @@ async def sync_batch(ad_specific_dir: Path, completion_msg: BatchCompleted, sync
     print(msg.to_json())
 
     # send sync event
-
 
     if msg.data.kind == bot_api.BatchSyncStatus.ERROR:
         print("ERROR: ", msg.to_json())
@@ -312,17 +319,21 @@ async def delete_dirs(request: aiohttp.web_request):
             with sentry_sdk.configure_scope() as scope:
                 dump_dir = DumpDir(data_dir)
 
+                @sync_to_async
+                def filter_batch_dups():
+                    return Batch.objects.filter(location__state_name=dump_dir.location,
+                                                start_timestamp=dump_dir.run_id,
+                                                server_hostname=dump_dir.host_hostname,
+                                                server_container=dump_dir.container_hostname,
+                                                )[0]
+
                 try:
                     # Check Batch in db marked as synced before deletion
                     # non-async django, may stall application.
 
                     # Use 1st batch duplicate for determining if synced
                     try:
-                        batch = Batch.objects.filter(location__state_name=dump_dir.location,
-                                              start_timestamp=dump_dir.run_id,
-                                              server_hostname=dump_dir.host_hostname,
-                                              server_container=dump_dir.container_hostname,
-                                              )[0]
+                        batch = await filter_batch_dups()
                     except IndexError:
                         print(f"{dump_dir}, is not a batch")
                         continue
@@ -378,6 +389,7 @@ async def background_delete(app):
             traceback.print_exc()
             raise e
 
+
 async def periodic_sync_unprocessed(app):
     """Periodically check for unsynced data. Sync it."""
     server_address = app["socket_file"]
@@ -405,17 +417,17 @@ async def periodic_sync_unprocessed(app):
 async def start_background_tasks(app):
     loop = asyncio.get_running_loop()
     app['periodic_delete'] = loop.create_task(background_delete(app))
-    #app['periodic_sync'] = loop.create_task(periodic_sync_ping(app))
+    # app['periodic_sync'] = loop.create_task(periodic_sync_ping(app))
     app['periodic_sync_unprocessed'] = loop.create_task(periodic_sync_unprocessed(app))
 
 
 async def cleanup_background_tasks(app):
     app["periodic_delete"].cancel()
-    #app["periodic_sync"].cancel()
+    # app["periodic_sync"].cancel()
     app["periodic_sync_unprocessed"].cancel()
 
     await app["periodic_delete"]
-    #await app["periodic_sync"]
+    # await app["periodic_sync"]
     await app["periodic_sync_unprocessed"]
 
 
@@ -436,17 +448,21 @@ def determine_ad_format_version(ad_dir: pathlib.Path) -> int:
         return 1
 
 
-def reconstruct_completion_msg(dump_dir: DumpDir) -> BatchCompleted:
+async def reconstruct_completion_msg(dump_dir: DumpDir) -> BatchCompleted:
     """ad_dir: parent directory directly containing xml/json ad files
     returns a `BatchCompleted` message object"""
 
+    @sync_to_async
+    def get_existing_batch():
+        return Batch.objects.get(location__state_name=dump_dir.location,
+                                 start_timestamp=dump_dir.run_id,
+                                 server_hostname=dump_dir.host_hostname,
+                                 server_container=dump_dir.container_hostname,
+                                 )
+
     # Hack for no metadata about number of bots ran
     try:
-        batch = Batch.objects.get(location__state_name=dump_dir.location,
-                                  start_timestamp=dump_dir.run_id,
-                                  server_hostname=dump_dir.host_hostname,
-                                  server_container=dump_dir.container_hostname,
-                                  )
+        batch = await get_existing_batch()
         external_ip = batch.external_ip
         num_bots = batch.total_bots
     except Batch.DoesNotExist as e:
@@ -482,8 +498,12 @@ def reconstruct_completion_msg(dump_dir: DumpDir) -> BatchCompleted:
     last_request = last_request_time(dump_dir.path)
 
     # Count size of the video list bots watched
-    with dump_dir.path.joinpath("political_videos.csv").open() as f:
-        video_list_size = sum(1 for _ in f)
+    try:
+        with dump_dir.path.joinpath("political_videos.csv").open() as f:
+            video_list_size = sum(1 for _ in f)
+    except FileNotFoundError:
+        video_list_size = 550
+
     completion_msg = BatchCompleted(status=BatchCompletionStatus.COMPLETE, hostname=dump_dir.container_hostname,
                                     run_id=dump_dir.run_id,
                                     external_ip=external_ip, bots_in_batch=num_bots,
@@ -517,7 +537,7 @@ async def reconstruct_all(request: aiohttp.web_request.Request):
     for data_dir in new_data_dirs:
         try:
             dump_dir = DumpDir(ad_dir=data_dir)
-            msg = reconstruct_completion_msg(dump_dir)
+            msg = await reconstruct_completion_msg(dump_dir)
             print(f"completion_msg: {msg.to_json()}")
 
             if not batch_is_old_using_completion_msg(msg) and not force_sync:
@@ -674,7 +694,7 @@ async def sync_unprocessed(request: aiohttp.web_request.Request):
             data_dir.joinpath("done").touch()
             request.app.logger.info(f"Marked directory as done with batch, batch_dir={data_dir.as_posix()}")
 
-            completion_msg = reconstruct_completion_msg(dump_dir)
+            completion_msg = await reconstruct_completion_msg(dump_dir)
 
             request.app.logger.info(f"directory syncing:, batch_dir={data_dir.as_posix()}")
             result = await sync_directory(src=data_dir, sync_context=sync_context)
