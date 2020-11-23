@@ -191,13 +191,24 @@ async def test_check(request: aiohttp.web_request.Request):
 
 
 async def sync_directory(src: Path, sync_context: SyncContext) -> Union[BatchSyncComplete, bot_api.BatchSyncError]:
+    # Check if the destination storage directory is mounted correctly.
+    # There is a check file that is present.
+    check_file_name = "lss-check-file"
+    check_file_path = sync_context.dest_storage_base_dir.joinpath(check_file_name)
+    if not check_file_path.exists():
+        err = bot_api.BatchSyncErrMsg(returncode=2, stdout="",
+                                      stderr=f"Cannot verify destination directory is mounted. Required check file does not exist: {check_file_path.as_posix()}")
+        return bot_api.BatchSyncError(err_info=err)
+
     rsync_commands = ["rsync", "-a", "--relative",
                       # can't set times/permissions/ownership on files when switch LSS mount to group instead of root
                       "--no-t", "--no-perms", "--no-owner", "--no-group",
                       # example: /home/alex/github/dumps/./louisiana/node12.misc.iastate.edu#e6ede031d296/1564364031
                       ####src_base##########   ######################src################################
                       f"{sync_context.ad_unsynced_local_base_dir.as_posix()}/./{src.relative_to(sync_context.ad_unsynced_local_base_dir).as_posix()}",
-                      f"{sync_context.dest_storage_user}@{sync_context.dest_storage_hostname}:{sync_context.dest_storage_base_dir.as_posix()}"]
+
+                      # Sync to locally mounted LSS. default /lss/unprocessed
+                      f"{sync_context.dest_storage_base_dir.as_posix()}"]
     logger.info("rsync commands:", str(rsync_commands))
     sync: suprocess.Process = await suprocess.create_subprocess_exec(*rsync_commands,
                                                                      stderr=asyncio.subprocess.PIPE,
