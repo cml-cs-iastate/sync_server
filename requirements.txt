@@ -1,8 +1,10 @@
 git+git://github.com/cml-cs-iastate/bot_api@0.10
-git+git://github.com/cml-cs-iastate/CyadsProcessor@1.32.0
-google-cloud-pubsub == 1.5.0
-aiohttp[] >= 3.6.2
-django == 3.0.7
-beautifulsoup4 == 4.9.1
-more_itertools == 8.3.0
-sentry_sdk == 0.14.4
+git+git://github.com/cml-cs-iastate/CyadsProcessor@master#egg=cyads_processor
+google-cloud-pubsub==2.1.0
+google-api-python-client==1.12.8
+grpcio==1.33.2
+aiohttp[]==3.7.3
+django>=3.0.7
+beautifulsoup4 >= 4.8.0
+more_itertools >= 8.3.0
+sentry_sdk >= 0.19.4
