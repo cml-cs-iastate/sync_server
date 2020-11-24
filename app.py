@@ -20,7 +20,7 @@ import pathlib
 from pathlib import Path
 from more_itertools import first, ilen
 from bot_api import (BatchSyncComplete, BatchSyncStatus, BatchSynced, BotEvents, BatchCompleted, BatchCompletionStatus)
-from datetime import datetime, timezone
+from datetime import datetime
 from django.core.exceptions import ObjectDoesNotExist
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sync_server.settings")
@@ -180,7 +180,7 @@ def batch_is_old_using_completion_msg(completion_msg: BatchCompleted) -> bool:
 
 
 def batch_is_old(start_time: int) -> bool:
-    age_of_batch = datetime.now(timezone.utc) - datetime.utcfromtimestamp(start_time)
+    age_of_batch = datetime.now() - datetime.utcfromtimestamp(start_time)
     hours_threshold = 24
     batch_age_hours = age_of_batch.days * 24 + age_of_batch.seconds / 60 / 60
     return batch_age_hours >= hours_threshold
