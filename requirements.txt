@@ -2,7 +2,7 @@ git+git://github.com/cml-cs-iastate/bot_api@0.10
 git+git://github.com/cml-cs-iastate/CyadsProcessor@master#egg=cyads_processor
 google-cloud-pubsub==2.1.0
 google-api-python-client==1.12.8
-grpcio==1.53.0
+grpcio==1.53.2
 aiohttp[]==3.7.3
 django>=3.0.7
 beautifulsoup4 >= 4.8.0
